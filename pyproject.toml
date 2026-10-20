@@ -9,8 +9,10 @@ dependencies = [
     "google-auth-httplib2>=0.4.4",
     "google-auth-oauthlib>=1.5.0",
     "langchain>=1.4.6",
+    "langchain-anthropic>=1.7.6",
     "langchain-openai>=1.7.2",
     "langgraph>=1.2.15",
+    "langsmith>=0.14.8",
     "python-dotenv>=1.2.4",
     "sqlalchemy>=2.1.5",
 ]

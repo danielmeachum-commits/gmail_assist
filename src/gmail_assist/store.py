@@ -34,8 +34,10 @@ Kind = Literal['bulk', 'personal']
 # 'label':  add `label` (creating it if new_label) -- the main categorization
 # 'expire': login code / sign-in link; trash once read or a day old
 # 'trash', 'archive': act now
+# 'review': not confident enough to act; `label` holds the best suggestion
+#           and the applier leaves it for you (see review_queue())
 # 'none':   looked at, deliberately left alone
-Action = Literal['label', 'expire', 'trash', 'archive', 'none']
+Action = Literal['label', 'expire', 'trash', 'archive', 'review', 'none']
 SubscriptionStatus = Literal['active', 'flagged', 'keep', 'unsubscribed']
 
 
@@ -82,6 +84,12 @@ class Message(Base):
     snippet: Mapped[str | None] = mapped_column(Text)
     label_ids: Mapped[list[str]] = mapped_column(default=list)
     unread: Mapped[bool] = mapped_column(default=False)
+    # Gmail has no read timestamp, so this is when sync *saw* UNREAD removed:
+    # seconds after the fact with push, up to the backstop interval without.
+    # Only meaningful when first_seen_unread -- mail that was already read
+    # when first synced never gets one.
+    read_at: Mapped[datetime | None]
+    first_seen_unread: Mapped[bool] = mapped_column(default=False, server_default='0')
     # 'bulk' = has List-Unsubscribe; only headers are fetched for these.
     kind: Mapped[str] = mapped_column(String(16))
     subscription_key: Mapped[str | None]
@@ -104,7 +112,7 @@ class Decision(Base):
     __tablename__ = 'decisions'
     __table_args__ = (
         CheckConstraint(
-            "action IN ('label', 'expire', 'trash', 'archive', 'none')", name='action_valid'
+            "action IN ('label', 'expire', 'trash', 'archive', 'review', 'none')", name='action_valid'
         ),
         Index('decisions_message', 'account', 'message_id'),
         Index('decisions_unapplied', 'applied_at'),
@@ -192,6 +200,7 @@ def _message_row(account: str, m: dict, now: datetime) -> dict[str, Any]:
         'snippet': m.get('snippet'),
         'label_ids': label_ids,
         'unread': 'UNREAD' in label_ids,
+        'first_seen_unread': 'UNREAD' in label_ids,
         'kind': 'bulk' if unsub else 'personal',
         'subscription_key': (parse.list_id(m) or parse.sender_email(m)) if unsub else None,
         # format='metadata' responses have no body parts at all.
@@ -199,6 +208,51 @@ def _message_row(account: str, m: dict, now: datetime) -> dict[str, Any]:
         'payload': m,
         'synced_at': now,
     }
+
+
+def _read_at(new_unread, now: datetime):
+    """SQL for messages.read_at given the incoming unread value (a bool, or
+    a column like excluded.unread in an upsert). In an UPDATE, Message.unread
+    and Message.read_at still mean the old row."""
+    if isinstance(new_unread, bool):
+        if new_unread:
+            return None                                       # (marked) unread: clear it
+        return case((Message.unread, now), else_=Message.read_at)  # just read: stamp it
+    return case(
+        (Message.unread & ~new_unread, now),
+        (new_unread, None),
+        else_=Message.read_at,
+    )
+
+
+def _migrate(engine: Engine) -> None:
+    """Bring tables created by older versions up to date. create_all() only
+    creates missing tables: new columns are added with ALTER TABLE, and since
+    SQLite can't alter a CHECK constraint, a changed one means rebuilding the
+    table and copying its rows across."""
+    with engine.begin() as conn:
+        columns = {row[1] for row in conn.exec_driver_sql('PRAGMA table_info(messages)')}
+        if 'read_at' not in columns:
+            conn.exec_driver_sql('ALTER TABLE messages ADD COLUMN read_at DATETIME')
+        if 'first_seen_unread' not in columns:
+            conn.exec_driver_sql(
+                'ALTER TABLE messages ADD COLUMN first_seen_unread BOOLEAN NOT NULL DEFAULT 0'
+            )
+            # Still unread now means it was unread when first seen; for read
+            # mail there's no way to know, so it stays 0 (no read time).
+            conn.exec_driver_sql('UPDATE messages SET first_seen_unread = unread')
+
+        sql = conn.exec_driver_sql(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'decisions'"
+        ).scalar()
+        if "'review'" not in sql:
+            # Added the 'review' action.
+            conn.exec_driver_sql('ALTER TABLE decisions RENAME TO decisions_old')
+            for index in Decision.__table__.indexes:
+                conn.exec_driver_sql(f'DROP INDEX IF EXISTS {index.name}')
+            Decision.__table__.create(conn)
+            conn.exec_driver_sql('INSERT INTO decisions SELECT * FROM decisions_old')
+            conn.exec_driver_sql('DROP TABLE decisions_old')
 
 
 class Store:
@@ -212,6 +266,7 @@ class Store:
         os.chmod(path, 0o600)
         self.engine = make_engine(path)
         Base.metadata.create_all(self.engine)
+        _migrate(self.engine)
         self.Session = sessionmaker(self.engine, expire_on_commit=False)
 
     def close(self) -> None:
@@ -253,8 +308,12 @@ class Store:
         stmt = stmt.on_conflict_do_update(
             index_elements=[Message.account, Message.id],
             set_={
-                col: getattr(stmt.excluded, col)
-                for col in ('history_id', 'label_ids', 'unread', 'payload', 'has_body', 'synced_at')
+                **{
+                    col: getattr(stmt.excluded, col)
+                    for col in ('history_id', 'label_ids', 'unread', 'payload', 'has_body', 'synced_at')
+                },
+                # first_seen_unread is deliberately left as first inserted.
+                'read_at': _read_at(stmt.excluded.unread, now),
             },
         )
         with self.Session.begin() as s:
@@ -299,13 +358,15 @@ class Store:
     def set_labels(self, account: str, labels: dict[str, list[str]]) -> int:
         """Update label_ids for already-stored messages ({message_id: labelIds}),
         e.g. from history labelsAdded/labelsRemoved. Unknown ids are ignored."""
+        now = _now()
         with self.Session.begin() as s:
             n = 0
             for id, label_ids in labels.items():
+                unread = 'UNREAD' in label_ids
                 n += s.execute(
                     update(Message)
                     .where(Message.account == account, Message.id == id)
-                    .values(label_ids=label_ids, unread='UNREAD' in label_ids)
+                    .values(label_ids=label_ids, unread=unread, read_at=_read_at(unread, now))
                 ).rowcount
         return n
 
@@ -424,6 +485,19 @@ class Store:
         with self.Session() as s:
             return list(s.scalars(q.order_by(Decision.created_at)))
 
+    def review_queue(self, account: str) -> list[tuple[Decision, Message]]:
+        """Messages flagged for your review, oldest first, with the best
+        suggestion in each decision's label/confidence/reason."""
+        q = (
+            select(Decision, Message)
+            .join(Message, (Message.account == Decision.account) & (Message.id == Decision.message_id))
+            .where(Decision.account == account, Decision.action == 'review',
+                   Decision.applied_at.is_(None), Decision.apply_error.is_(None))
+            .order_by(Decision.created_at)
+        )
+        with self.Session() as s:
+            return [(d, m) for d, m in s.execute(q)]
+
     def mark_decision_applied(self, decision_id: int, error: str | None = None) -> None:
         with self.Session.begin() as s:
             s.execute(
@@ -434,8 +508,10 @@ class Store:
 
     # -- subscriptions ------------------------------------------------------
 
-    def subscription_stats(self, account: str, days: int = 90) -> list[dict[str, Any]]:
+    def subscription_stats(self, account: str, days: int = 90,
+                           key: str | None = None) -> list[dict[str, Any]]:
         """Per-list volume and read rate over the last `days`, busiest first.
+        Pass `key` for a single list.
 
         'Read' means the UNREAD label is gone, which is the only signal Gmail
         gives -- opening it, or marking it read, both count.
@@ -447,11 +523,17 @@ class Store:
                 func.count(Message.id).label('received'),
                 func.coalesce(func.sum(case((Message.unread, 0), else_=1)), 0).label('read'),
                 func.max(Message.internal_date).label('latest_ms'),
+                # Hours from arrival to (observed) read, for mail with a read time.
+                # julianday() counts days from 4713 BC; 2440587.5 is the Unix epoch.
+                func.avg(
+                    ((func.julianday(Message.read_at) - 2440587.5) * 86400
+                     - Message.internal_date / 1000) / 3600
+                ).label('avg_hours_to_read'),
             )
             .outerjoin(Message, (Message.account == Subscription.account)
                        & (Message.subscription_key == Subscription.key)
                        & (Message.internal_date >= since_ms))
-            .where(Subscription.account == account)
+            .where(Subscription.account == account, *([Subscription.key == key] if key else []))
             .group_by(Subscription.account, Subscription.key)
             .order_by(func.count(Message.id).desc())
         )
@@ -464,20 +546,27 @@ class Store:
                     'read_rate': read / received if received else None,
                     'per_week': received / (days / 7),
                     'latest_ms': latest_ms,
+                    'avg_hours_to_read': avg_hours,
                 }
-                for sub, received, read, latest_ms in s.execute(q)
+                for sub, received, read, latest_ms, avg_hours in s.execute(q)
             ]
 
     def set_subscription_status(self, account: str, key: str, status: SubscriptionStatus, *,
-                                by: str, reason: str | None = None) -> None:
+                                by: str, reason: str | None = None,
+                                only_from: SubscriptionStatus | None = None) -> bool:
+        """Set a list's status. With `only_from`, change it only if it's
+        currently that status (e.g. so automation never overrides a 'keep'
+        you set by hand). Returns whether it changed."""
+        q = update(Subscription).where(Subscription.account == account, Subscription.key == key)
+        if only_from:
+            q = q.where(Subscription.status == only_from)
         with self.Session.begin() as s:
             res = s.execute(
-                update(Subscription)
-                .where(Subscription.account == account, Subscription.key == key)
-                .values(status=status, status_reason=reason, status_by=by, status_at=_now())
+                q.values(status=status, status_reason=reason, status_by=by, status_at=_now())
             )
-            if not res.rowcount:
+            if not res.rowcount and not only_from:
                 raise KeyError(f'no subscription {key!r} for {account}')
+        return bool(res.rowcount)
 
     def subscriptions(self, account: str, status: SubscriptionStatus | None = None) -> list[Subscription]:
         q = select(Subscription).where(Subscription.account == account)

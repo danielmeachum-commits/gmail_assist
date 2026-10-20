@@ -42,6 +42,37 @@ def serve(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
           host=args.host, port=args.port, path=args.path, db=args.db)
 
 
+def process(args: argparse.Namespace) -> None:
+    from gmail_assist.agent.run import process
+    from gmail_assist.store import Store
+
+    with Store(args.db) as store:
+        counts = process(get_service('read'), store, limit=args.limit, kind=args.kind)
+        print(f'Processed: {counts}. Queue: {store.counts()}')
+
+
+def setup_logging(verbose: bool) -> None:
+    console_level = logging.INFO if verbose else logging.WARNING
+    logging.basicConfig(level=console_level,
+                        format='%(asctime)s %(levelname)s %(name)s: %(message)s', datefmt='%H:%M:%S')
+    for handler in logging.getLogger().handlers:
+        handler.setLevel(console_level)
+    # Our own INFO logs are always produced, so LangSmith gets them even
+    # without -v; the console handler above still filters them.
+    logging.getLogger('gmail_assist').setLevel(logging.INFO)
+    # Per-request lines from the HTTP clients drown out everything else.
+    for noisy in ('httpx', 'httpcore', 'googleapiclient'):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+    # The graph trace is already formatted as a readable tree: print it bare.
+    trace = logging.getLogger('gmail_assist.agent.trace')
+    trace.setLevel(logging.INFO if verbose else logging.WARNING)
+    if not trace.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter('%(message)s'))
+        trace.addHandler(handler)
+    trace.propagate = False
+
+
 def main() -> None:
     load_dotenv()
     parser = argparse.ArgumentParser(prog='gmail-assist')
@@ -64,12 +95,18 @@ def main() -> None:
     p.add_argument('--port', type=int, default=8080)
     p.add_argument('--path', default='/gmail/push')
     p.add_argument('--db', help='store path (default: ~/.local/share/gmail_assist/store.db)')
+    p = sub.add_parser('process', help='run pending messages through the triage graph (dry run)')
+    p.add_argument('--limit', type=int, default=20)
+    p.add_argument('--kind', choices=['personal', 'bulk'])
+    p.add_argument('--db', help='store path (default: ~/.local/share/gmail_assist/store.db)')
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
+    setup_logging(args.verbose)
     if args.command == 'sync':
         sync(args)
     elif args.command == 'serve':
         serve(args, parser)
+    elif args.command == 'process':
+        process(args)
     else:
         labels()
