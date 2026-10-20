@@ -12,3 +12,6 @@ wheels/
 # Google OAuth secrets and tokens
 credentials*.json
 token.json
+
+# Local config (topic, push audience, ...)
+.env

@@ -1,5 +1,8 @@
 import argparse
 import logging
+import os
+
+from dotenv import load_dotenv
 
 from gmail_assist.gmail.auth import get_service
 
@@ -30,7 +33,17 @@ def sync(args: argparse.Namespace) -> None:
         print(f'Synced {n} new messages. Queue: {store.counts()}')
 
 
+def serve(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    from gmail_assist.watch import serve
+
+    if not args.topic or not args.audience:
+        parser.error('serve needs --topic and --audience (or GMAIL_ASSIST_TOPIC / GMAIL_ASSIST_PUSH_AUDIENCE)')
+    serve(get_service('read'), args.topic, args.audience, args.service_account,
+          host=args.host, port=args.port, path=args.path, db=args.db)
+
+
 def main() -> None:
+    load_dotenv()
     parser = argparse.ArgumentParser(prog='gmail-assist')
     parser.add_argument('-v', '--verbose', action='store_true')
     sub = parser.add_subparsers(dest='command')
@@ -40,10 +53,23 @@ def main() -> None:
     p.add_argument('--query', default='newer_than:90d', help='Gmail search for full syncs')
     p.add_argument('--limit', type=int, help='max messages for a full sync')
     p.add_argument('--db', help='store path (default: ~/.local/share/gmail_assist/store.db)')
+    p = sub.add_parser('serve', help='receive Gmail push notifications and sync on each one')
+    p.add_argument('--topic', default=os.environ.get('GMAIL_ASSIST_TOPIC'),
+                   help='Pub/Sub topic Gmail publishes to (projects/<p>/topics/<t>)')
+    p.add_argument('--audience', default=os.environ.get('GMAIL_ASSIST_PUSH_AUDIENCE'),
+                   help="the subscription's push auth audience (defaults to the push endpoint URL)")
+    p.add_argument('--service-account', default=os.environ.get('GMAIL_ASSIST_PUSH_SA'),
+                   help='only accept pushes signed as this service account')
+    p.add_argument('--host', default='127.0.0.1', help='bind address; the tunnel connects here')
+    p.add_argument('--port', type=int, default=8080)
+    p.add_argument('--path', default='/gmail/push')
+    p.add_argument('--db', help='store path (default: ~/.local/share/gmail_assist/store.db)')
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
     if args.command == 'sync':
         sync(args)
+    elif args.command == 'serve':
+        serve(args, parser)
     else:
         labels()

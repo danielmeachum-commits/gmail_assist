@@ -26,7 +26,15 @@ METADATA_HEADERS = [
 # Gmail allows up to 100 calls per batch, but large batches trip the
 # per-user rate limit quickly; 25 is a reasonable middle ground.
 BATCH_SIZE = 25
+# Gmail's per-user quota is 15,000 units/min (250/s) and messages.get costs 5.
+# Batches start paced under that and slow down whenever Gmail pushes back.
+QUOTA_UNITS_PER_S = 200
+GET_COST = 5
 MAX_RETRIES = 5
+# The quota is per minute, so retries must wait long enough to reach a fresh
+# window: 30s, 60s, then 120s.
+RETRY_BASE_S = 30
+RETRY_MAX_S = 120
 # Never sync these: they aren't mail you received.
 SKIP_LABELS = {'DRAFT', 'CHAT'}
 
@@ -37,9 +45,32 @@ def _chunks(items: list, n: int) -> Iterable[list]:
 
 
 def _is_retryable(err: HttpError) -> bool:
+    # 403s cover both rateLimitExceeded and userRateLimitExceeded.
     return err.resp.status in (429, 500, 502, 503, 504) or (
-        err.resp.status == 403 and b'rateLimitExceeded' in (err.content or b'')
+        err.resp.status == 403 and b'ratelimitexceeded' in (err.content or b'').lower()
     )
+
+
+class _Pacer:
+    """Spaces batches to a units/s rate that halves when Gmail throttles
+    and creeps back up while it doesn't."""
+
+    def __init__(self, max_rate: float):
+        self.max_rate = self.rate = max_rate
+
+    def wait(self, units: int, started: float) -> None:
+        time.sleep(max(0.0, units / self.rate - (time.monotonic() - started)))
+
+    def throttled(self) -> None:
+        self.rate = max(self.max_rate / 16, self.rate / 2)
+        log.info('throttled; pacing at %.0f units/s', self.rate)
+
+    def ok(self) -> None:
+        self.rate = min(self.max_rate, self.rate * 1.05)
+
+
+# Module-level so the learned rate carries across calls within a process.
+_pacer = _Pacer(QUOTA_UNITS_PER_S)
 
 
 def _batch_get(service, ids: list[str], fmt: str) -> list[dict]:
@@ -49,7 +80,8 @@ def _batch_get(service, ids: list[str], fmt: str) -> list[dict]:
     todo = list(ids)
     for attempt in range(MAX_RETRIES + 1):
         retry: list[str] = []
-        for chunk in _chunks(todo, BATCH_SIZE):
+        chunks = list(_chunks(todo, BATCH_SIZE))
+        for n, chunk in enumerate(chunks):
             def callback(request_id, response, exception):
                 if exception is None:
                     results[request_id] = response
@@ -66,12 +98,21 @@ def _batch_get(service, ids: list[str], fmt: str) -> list[dict]:
                 if fmt == 'metadata':
                     kwargs['metadataHeaders'] = METADATA_HEADERS
                 batch.add(service.users().messages().get(**kwargs), request_id=id)
+            started = time.monotonic()
             batch.execute()
+            _pacer.wait(len(chunk) * GET_COST, started)
+            if retry:
+                # The quota window is spent: stop sending (every call made
+                # now just fails) and retry the rest after the backoff.
+                _pacer.throttled()
+                retry += [id for rest in chunks[n + 1:] for id in rest]
+                break
+            _pacer.ok()
         if not retry:
             break
         if attempt == MAX_RETRIES:
             raise RuntimeError(f'gave up on {len(retry)} messages after {MAX_RETRIES} retries')
-        delay = min(2 ** attempt, 32) + random.random()
+        delay = min(RETRY_BASE_S * 2 ** attempt, RETRY_MAX_S) + random.uniform(0, 5)
         log.info('rate limited on %d messages, retrying in %.1fs', len(retry), delay)
         time.sleep(delay)
         todo = retry
@@ -91,8 +132,10 @@ def fetch_messages(service, ids: list[str]) -> list[dict]:
 
 def _store_new(service, store: Store, account: str, ids: list[str]) -> int:
     n = 0
-    for chunk in _chunks(ids, 100):
+    for i, chunk in enumerate(_chunks(ids, 100)):
         n += store.upsert_messages(account, fetch_messages(service, chunk))
+        if len(ids) > 100:
+            log.info('fetched %d/%d', min((i + 1) * 100, len(ids)), len(ids))
     return n
 
 
@@ -113,8 +156,13 @@ def full_sync(service, store: Store, account: str, query: str = 'newer_than:90d'
             break
         request = service.users().messages().list_next(request, response)
 
-    log.info('full sync: %d messages match %r', len(ids), query)
-    n = _store_new(service, store, account, ids)
+    # Skip what's already stored, so an interrupted full sync resumes where
+    # it stopped instead of refetching everything.
+    known: set[str] = set()
+    for chunk in _chunks(ids, 10_000):
+        known |= store.known_ids(account, chunk)
+    log.info('full sync: %d messages match %r, %d already stored', len(ids), query, len(known))
+    n = _store_new(service, store, account, [i for i in ids if i not in known])
     store.set_history_id(account, history_id)
     return n
 

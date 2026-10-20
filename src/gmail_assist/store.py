@@ -206,9 +206,12 @@ class Store:
         path = Path(path) if path else default_db_path()
         # Message bodies are private, so keep the directory user-only.
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Create the file 0600 before SQLite opens it: the -wal/-shm files
+        # (which hold message data too) copy the database file's permissions.
+        os.close(os.open(path, os.O_RDWR | os.O_CREAT, 0o600))
+        os.chmod(path, 0o600)
         self.engine = make_engine(path)
         Base.metadata.create_all(self.engine)
-        os.chmod(path, 0o600)
         self.Session = sessionmaker(self.engine, expire_on_commit=False)
 
     def close(self) -> None:
