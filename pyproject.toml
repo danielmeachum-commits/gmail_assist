@@ -12,6 +12,7 @@ dependencies = [
     "langchain-openai>=1.7.2",
     "langgraph>=1.2.15",
     "python-dotenv>=1.2.4",
+    "sqlalchemy>=2.1.5",
 ]
 
 [project.scripts]
