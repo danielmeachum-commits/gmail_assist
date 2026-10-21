@@ -18,7 +18,8 @@ with an X-Gmail-Assist header (which a cross-site form can't send).
 
 It reads and writes only the local store, and never calls Gmail. The
 outside calls are "write a summary now" (Claude, like the schedule) and
-adding a summary item to Google Calendar (see gcal.py).
+adding a summary item to Google Calendar (see gcal.py), and one-click
+unsubscribe requests to mailing lists you select (see unsubscribe.py).
 
 Signing in to Google also happens here (see auth.py, "signing in from the
 dashboard"): /api/auth/start hands the browser a Google URL, and Google
@@ -31,6 +32,7 @@ import logging
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -39,7 +41,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
-from gmail_assist import gcal
+from gmail_assist import gcal, unsubscribe
 from gmail_assist.agent import nodes, summary
 from gmail_assist.agent.labels import DEFINITIONS, automated, parent
 from gmail_assist.agent.run import PROPOSAL_MIN_MESSAGES, PROPOSAL_MIN_SENDERS
@@ -51,6 +53,9 @@ log = logging.getLogger(__name__)
 
 PORT = 8090
 MAX_BODY = 64 * 1024
+# One-click unsubscribes per request, and how many run at once.
+MAX_BULK = 300
+UNSUBSCRIBE_WORKERS = 4
 CSRF_HEADER = 'X-Gmail-Assist'
 GRANTS = ('read', 'modify', 'calendar')
 SIGNIN_TTL_S = 600
@@ -285,12 +290,64 @@ class Api:
                 'url': next((u for u in sub.unsubscribe_urls if u.startswith(('https://', 'http://'))), None),
                 'mailto': next((u for u in sub.unsubscribe_mailtos if u.startswith('mailto:')), None),
                 'one_click': sub.one_click,
+                # Can be unsubscribed from here: one-click, over https, with an email to check DKIM on.
+                'auto': bool(sub.one_click and last
+                             and any(u.startswith('https://') for u in sub.unsubscribe_urls)),
                 'last_subject': last.subject if last else None,
                 'last_received': _received(last) if last else None,
                 'last_id': last.id if last else None,
             })
         out.sort(key=lambda r: -r['per_week'])
         return {'lists': out, 'per_week': sum(r['per_week'] for r in out), 'kept': kept}
+
+    def _keys(self, body: dict) -> list[str]:
+        keys = body.get('keys')
+        if not isinstance(keys, list) or not keys or not all(isinstance(k, str) for k in keys):
+            raise ValueError('keys must be a list of list keys')
+        if len(keys) > MAX_BULK:
+            raise ValueError(f'at most {MAX_BULK} at a time')
+        return list(dict.fromkeys(keys))
+
+    def bulk_subscriptions(self, body: dict) -> dict[str, Any]:
+        """Set the same status on several lists (keep / unsubscribed / active)."""
+        status = body.get('status')
+        if status not in ('keep', 'unsubscribed', 'active'):
+            raise ValueError('status must be keep, unsubscribed or active')
+        keys = self._keys(body)
+        for key in keys:
+            self.store.set_subscription_status(self.account, key, status, by='user',
+                                               reason='set in the dashboard')
+        return {'ok': True, 'updated': len(keys)}
+
+    def bulk_unsubscribe(self, body: dict) -> dict[str, Any]:
+        """Send one-click unsubscribes to the selected lists; those that
+        accept are marked unsubscribed. Returns a result per list."""
+        keys = self._keys(body)
+        subs = {s.key: s for s in self.store.subscriptions(self.account)}
+        latest = self.store.latest_by_list(self.account)
+
+        def one(key: str) -> dict[str, Any]:
+            sub, last = subs.get(key), latest.get(key)
+            url = next((u for u in (sub.unsubscribe_urls if sub else []) if u.startswith('https://')), None)
+            if not sub or not sub.one_click or not url or not last:
+                return {'key': key, 'ok': False, 'detail': "doesn't support one-click unsubscribe"}
+            try:
+                detail = unsubscribe.one_click(url, last.id)
+            except unsubscribe.Refused as err:
+                return {'key': key, 'ok': False, 'detail': str(err)}
+            except AuthRequired:
+                return {'key': key, 'ok': False, 'detail': 'Gmail sign-in needed to check DKIM'}
+            except Exception as err:
+                log.warning('one-click unsubscribe from %s failed: %s: %s', key, type(err).__name__, err)
+                return {'key': key, 'ok': False, 'detail': f'failed: {type(err).__name__}'}
+            self.store.set_subscription_status(self.account, key, 'unsubscribed', by='one-click',
+                                               reason=f'one-click unsubscribe: {detail}')
+            return {'key': key, 'ok': True, 'detail': detail}
+
+        with ThreadPoolExecutor(max_workers=UNSUBSCRIBE_WORKERS) as pool:
+            results = list(pool.map(one, keys))
+        log.info('one-click unsubscribe: %d of %d accepted', sum(r['ok'] for r in results), len(results))
+        return {'results': results}
 
     def set_subscription(self, body: dict) -> dict[str, Any]:
         """keep (never suggest it again), unsubscribed (you left it), or active (undo)."""
@@ -548,6 +605,10 @@ def make_handler(api: Api, allowed_hosts: set[str]) -> type[BaseHTTPRequestHandl
                 self._run(lambda: api.start_signin(body))
             elif path == '/api/subscriptions':
                 self._run(lambda: api.set_subscription(body))
+            elif path == '/api/subscriptions/bulk':
+                self._run(lambda: api.bulk_subscriptions(body))
+            elif path == '/api/unsubscribe/one-click':
+                self._run(lambda: api.bulk_unsubscribe(body))
             elif path == '/api/done':
                 self._run(lambda: api.set_done(body))
             elif path == '/api/calendar':

@@ -173,7 +173,13 @@ details.table-view td:first-child, details.table-view th:first-child { text-alig
 #tip .row span:first-child::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; background: var(--c); }
 /* Unsubscribe suggestions */
 .sec-h.unsub { color: var(--muted); }
-.unsub-row { display: grid; grid-template-columns: 1fr auto; gap: 10px 14px; align-items: center; padding: 12px 14px; border-top: 1px solid var(--line); }
+.unsub-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 10px 14px; border-bottom: 1px solid var(--line);
+  position: sticky; top: 104px; z-index: 1; background: var(--panel); border-radius: 10px 10px 0 0; }
+.unsub-bar .count { background: none; color: var(--muted); font-weight: 400; font-size: 12px; }
+.unsub-bar .spacer { flex: 1; }
+.unsub-row input[type=checkbox], .unsub-bar input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--accent); }
+.unsub-row .err { color: var(--bad); font-size: 12px; margin-top: 3px; }
+.unsub-row { display: grid; grid-template-columns: auto 1fr auto; gap: 10px 14px; align-items: center; padding: 12px 14px; border-top: 1px solid var(--line); }
 .unsub-row:first-child { border-top: 0; }
 .unsub-row .who { font-weight: 650; overflow-wrap: anywhere; }
 .unsub-row .why { color: var(--muted); font-size: 12px; margin-top: 2px; }
@@ -182,7 +188,7 @@ details.table-view td:first-child, details.table-view th:first-child { text-alig
 .rate { display: inline-block; font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums; margin-right: 6px; }
 .unsub-row.settled { opacity: .55; }
 .unsub-row.settled .who { text-decoration: line-through; }
-@media (max-width: 560px) { .unsub-row { grid-template-columns: 1fr; } }
+@media (max-width: 560px) { .unsub-row { grid-template-columns: auto 1fr; } .unsub-row > .actions { grid-column: 2; } }
 .banner { max-width: 1200px; margin: 12px auto 0; padding: 0 16px; }
 .banner > div { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap;
   background: var(--bad-soft); color: var(--bad); border: 1px solid var(--bad); border-radius: 10px; padding: 10px 14px; font-weight: 600; }
@@ -297,7 +303,9 @@ dialog select, dialog input[type=text] { width: 100%; }
     <div class="sec" id="sec-unsub">
       <div class="sec-h unsub">Unsubscribe suggestions <span class="hint" id="unsub-hint"></span></div>
       <p class="note" style="margin-top:0">Lists you rarely open, from the last 90 days, busiest first. Starred lists and ones newer
-        than 3 weeks are never suggested. Unsubscribe page opens the list's own page; then mark it. Keep hides a list for good.</p>
+        than 3 weeks are never suggested. Lists marked <b>one-click</b> can be unsubscribed from here: select them and
+        Unsubscribe sends each list the standard one-click request (only to public https addresses, and only if Gmail
+        verified the list's email). Others: open their page, then mark them. Keep hides a list for good.</p>
       <div class="panel" id="unsub-list"></div>
     </div>
   </section>
@@ -618,47 +626,116 @@ async function loadReview() {
 }
 function renderUnsubscribe(data) {
   const lists = data.lists;
+  const selected = new Set();
+  const rows = new Map();          // key -> {row, box, actions, err}
+  const open = () => lists.filter(l => !l.settled);
   const hint = () => {
-    const open = lists.filter(l => !l.settled);
-    $('#unsub-hint').textContent = open.length
-      ? `${open.length} lists · ~${Math.round(open.reduce((a, l) => a + l.per_week, 0))} emails a week` + (data.kept ? ` · ${data.kept} kept` : '')
+    const o = open();
+    $('#unsub-hint').textContent = o.length
+      ? `${o.length} lists · ~${Math.round(o.reduce((a, l) => a + l.per_week, 0))} emails a week` + (data.kept ? ` · ${data.kept} kept` : '')
       : 'all handled';
   };
-  hint();
-  $('#unsub-list').replaceChildren(...(lists.length ? lists.map(l => {
-    const row = el('div', {class: 'unsub-row'});
-    const set = async (status, label) => {
-      try {
-        await api('/api/subscriptions', {key: l.key, status});
-        l.settled = status !== 'active';
-        row.classList.toggle('settled', l.settled);
-        actions.replaceChildren(...(l.settled
-          ? [el('span', {class: 'chip ' + (status === 'keep' ? 'ok-chip' : 'by-review')}, label),
-             el('button', {class: 'undo', onclick: () => set('active', '')}, 'Undo')]
-          : buttons()));
-        hint(); toast(label || 'Back in suggestions');
-      } catch (e) { toast(e.message); }
-    };
-    // Unsubscribe links come from the sender's headers; open them in a new tab only.
-    const buttons = () => [
-      l.url ? el('a', {class: 'cal', href: l.url, target: '_blank', rel: 'noopener noreferrer nofollow',
-                       title: l.one_click ? 'Supports one-click unsubscribe' : 'The list\'s unsubscribe page'}, 'Unsubscribe page ↗')
-            : l.mailto ? el('a', {class: 'cal', href: l.mailto, rel: 'noopener noreferrer'}, 'Unsubscribe by email ↗') : null,
-      el('button', {class: 'btn', onclick: () => set('unsubscribed', 'unsubscribed')}, 'Mark unsubscribed'),
-      el('button', {class: 'btn', onclick: () => set('keep', 'kept')}, 'Keep')];
-    const actions = el('div', {class: 'actions', style: 'justify-content:flex-end'}, ...buttons());
+  // -- toolbar
+  const count = el('span', {class: 'count'});
+  const all = el('input', {type: 'checkbox', 'aria-label': 'Select all one-click lists'});
+  const go = el('button', {class: 'btn primary'}, 'Unsubscribe');
+  const markBtn = el('button', {class: 'btn'}, 'Mark unsubscribed');
+  const keepBtn = el('button', {class: 'btn'}, 'Keep');
+  const autoOpen = () => open().filter(l => l.auto);
+  const sync = () => {
+    const n = selected.size, autos = [...selected].filter(k => lists.find(l => l.key === k).auto).length;
+    count.textContent = n ? `${n} selected` : '';
+    go.textContent = autos ? `Unsubscribe ${autos}` : 'Unsubscribe';
+    go.disabled = !autos; markBtn.disabled = keepBtn.disabled = !n;
+    const a = autoOpen();
+    all.checked = a.length > 0 && a.every(l => selected.has(l.key));
+    all.indeterminate = !all.checked && a.some(l => selected.has(l.key));
+    for (const [key, r] of rows) r.box.checked = selected.has(key);
+    hint();
+  };
+  all.addEventListener('change', () => {
+    for (const l of autoOpen()) all.checked ? selected.add(l.key) : selected.delete(l.key);
+    sync();
+  });
+  const settle = (l, status, label) => {
+    const r = rows.get(l.key);
+    l.settled = status !== 'active';
+    selected.delete(l.key);
+    r.row.classList.toggle('settled', l.settled);
+    r.box.disabled = l.settled;
+    r.actions.replaceChildren(...(l.settled
+      ? [el('span', {class: 'chip ' + (status === 'keep' ? 'ok-chip' : 'by-review')}, label),
+         el('button', {class: 'undo', onclick: () => setOne(l, 'active', '')}, 'Undo')]
+      : buttons(l)));
+  };
+  const setOne = async (l, status, label) => {
+    try { await api('/api/subscriptions', {key: l.key, status}); settle(l, status, label); sync(); toast(label || 'Back in suggestions'); }
+    catch (e) { toast(e.message); }
+  };
+  const bulkStatus = async (status, label) => {
+    const keys = [...selected];
+    try {
+      await api('/api/subscriptions/bulk', {keys, status});
+      keys.forEach(k => settle(lists.find(l => l.key === k), status, label));
+      sync(); toast(`${keys.length} ${status === 'keep' ? 'kept' : 'marked unsubscribed'}`);
+    } catch (e) { toast(e.message); }
+  };
+  markBtn.addEventListener('click', () => bulkStatus('unsubscribed', 'unsubscribed'));
+  keepBtn.addEventListener('click', () => bulkStatus('keep', 'kept'));
+  go.addEventListener('click', async () => {
+    const keys = [...selected].filter(k => lists.find(l => l.key === k).auto);
+    const skipped = selected.size - keys.length;
+    if (!confirm(`Send one-click unsubscribe requests to ${keys.length} list${keys.length === 1 ? '' : 's'}?` +
+                 (skipped ? `\n${skipped} selected list${skipped === 1 ? " doesn't" : "s don't"} support it and will be left selected.` : '')))
+      return;
+    go.disabled = true; go.textContent = `Unsubscribing ${keys.length}…`;
+    try {
+      const {results} = await api('/api/unsubscribe/one-click', {keys});
+      let ok = 0;
+      for (const res of results) {
+        const l = lists.find(x => x.key === res.key), r = rows.get(res.key);
+        if (res.ok) { ok++; settle(l, 'unsubscribed', '✓ unsubscribed'); r.err.textContent = ''; }
+        else r.err.textContent = `Not unsubscribed: ${res.detail}`;
+      }
+      toast(`Unsubscribed from ${ok} of ${results.length}` + (ok < results.length ? '; see the rows for why' : ''));
+    } catch (e) { toast(e.message); }
+    sync();
+  });
+  const bar = el('div', {class: 'unsub-bar'},
+    el('label', {class: 'actions', style: 'gap:6px'}, all, `Select all one-click (${autoOpen().length})`),
+    count, el('span', {class: 'spacer'}), go, markBtn, keepBtn);
+
+  // -- rows
+  // Unsubscribe links come from the sender's headers; open them in a new tab only.
+  const buttons = (l) => [
+    l.url ? el('a', {class: 'cal', href: l.url, target: '_blank', rel: 'noopener noreferrer nofollow',
+                     title: "The list's unsubscribe page"}, 'Page ↗')
+          : l.mailto ? el('a', {class: 'cal', href: l.mailto, rel: 'noopener noreferrer'}, 'By email ↗') : null,
+    el('button', {class: 'btn', onclick: () => setOne(l, 'unsubscribed', 'unsubscribed')}, 'Mark unsubscribed'),
+    el('button', {class: 'btn', onclick: () => setOne(l, 'keep', 'kept')}, 'Keep')];
+  const items = lists.map(l => {
+    const box = el('input', {type: 'checkbox', 'aria-label': `Select ${l.sender_email}`});
+    box.addEventListener('change', () => { box.checked ? selected.add(l.key) : selected.delete(l.key); sync(); });
+    const actions = el('div', {class: 'actions', style: 'justify-content:flex-end'}, ...buttons(l));
+    const err = el('div', {class: 'err'});
     const name = (l.sender || '').replace(/\s*<.*>$/, '').replace(/^"|"$/g, '') || l.sender_email;
-    row.append(
+    const row = el('div', {class: 'unsub-row'}, box,
       el('div', {},
-        el('div', {class: 'who'}, name, ' ', el('span', {class: 'when'}, l.sender_email)),
+        el('div', {class: 'who'}, name, ' ', el('span', {class: 'when'}, l.sender_email), ' ',
+           l.auto ? el('span', {class: 'chip by-local'}, 'one-click') : null),
         el('div', {class: 'why'}, el('span', {class: 'rate'}, `~${l.per_week.toFixed(1)}/week`),
            `opened ${l.read} of ${l.received} · `, l.rule === 'rule:promo_unread' ? 'promotions you rarely open'
              : l.rule === 'rule:noisy_updates' ? 'frequent notifications you rarely open' : 'you open these late, if at all'),
         l.last_id ? el('div', {class: 'last'}, 'Latest: ',
-          gmailLink(l.last_id, l.last_subject || '(no subject)', false), el('span', {class: 'when'}, ` · ${received(l.last_received)}`)) : null),
+          gmailLink(l.last_id, l.last_subject || '(no subject)', false), el('span', {class: 'when'}, ` · ${received(l.last_received)}`)) : null,
+        err),
       actions);
+    rows.set(l.key, {row, box, actions, err});
     return row;
-  }) : [el('div', {class: 'empty'}, 'No suggestions: every list you get, you read.')]));
+  });
+  $('#unsub-list').replaceChildren(...(lists.length ? [bar, ...items]
+    : [el('div', {class: 'empty'}, 'No suggestions: every list you get, you read.')]));
+  sync();
 }
 let recentView = 'all';
 $('#recent-filters').addEventListener('click', e => {

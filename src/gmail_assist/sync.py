@@ -22,6 +22,8 @@ log = logging.getLogger(__name__)
 
 METADATA_HEADERS = [
     'From', 'To', 'Subject', 'Date', 'List-Id', 'List-Unsubscribe', 'List-Unsubscribe-Post',
+    # Gmail's DKIM/SPF verdict: one-click unsubscribe only trusts signed headers.
+    'Authentication-Results',
 ]
 # Gmail allows up to 100 calls per batch, but large batches trip the
 # per-user rate limit quickly; 25 is a reasonable middle ground.
