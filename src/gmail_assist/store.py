@@ -1204,6 +1204,16 @@ class Store:
                 raise KeyError(f'no subscription {key!r} for {account}')
         return bool(res.rowcount)
 
+    def latest_by_list(self, account: str) -> dict[str, Message]:
+        """Each list's newest message, by subscription key."""
+        newest = (select(Message.subscription_key, func.max(Message.internal_date).label('d'))
+                  .where(Message.account == account, Message.subscription_key.isnot(None))
+                  .group_by(Message.subscription_key).subquery())
+        q = select(Message).join(newest, (Message.subscription_key == newest.c.subscription_key)
+                                 & (Message.internal_date == newest.c.d)).where(Message.account == account)
+        with self.ReadSession() as s:
+            return {m.subscription_key: m for m in s.scalars(q)}
+
     def subscriptions(self, account: str, status: SubscriptionStatus | None = None) -> list[Subscription]:
         q = select(Subscription).where(Subscription.account == account)
         if status:

@@ -260,6 +260,47 @@ class Api:
             'review_open': len(self.store.review_queue(self.account)),
         }
 
+    def unsubscribe_suggestions(self) -> dict[str, Any]:
+        """Mailing lists the unsubscribe rules (nodes.unsubscribe_flag) pick
+        out, over every list's last 90 days, busiest first. Lists you kept
+        or already left aren't suggested."""
+        now = datetime.now(timezone.utc)
+        latest = self.store.latest_by_list(self.account)
+        out, kept = [], 0
+        for row in self.store.subscription_stats(self.account, days=nodes.STATS_DAYS):
+            sub = row['subscription']
+            if sub.status in ('keep', 'unsubscribed'):
+                kept += sub.status == 'keep'
+                continue
+            days_known = (now - sub.first_seen.replace(tzinfo=timezone.utc)).total_seconds() / 86400
+            flag = nodes.unsubscribe_flag(row, days_known)
+            if not flag:
+                continue
+            last = latest.get(sub.key)
+            out.append({
+                'key': sub.key, 'sender': sub.sender, 'sender_email': sub.sender_email,
+                'reason': flag['reason'], 'rule': flag['by'],
+                'received': row['received'], 'read': row['read'], 'per_week': row['per_week'],
+                # Header values come from the sender: only web and mail links get through.
+                'url': next((u for u in sub.unsubscribe_urls if u.startswith(('https://', 'http://'))), None),
+                'mailto': next((u for u in sub.unsubscribe_mailtos if u.startswith('mailto:')), None),
+                'one_click': sub.one_click,
+                'last_subject': last.subject if last else None,
+                'last_received': _received(last) if last else None,
+                'last_id': last.id if last else None,
+            })
+        out.sort(key=lambda r: -r['per_week'])
+        return {'lists': out, 'per_week': sum(r['per_week'] for r in out), 'kept': kept}
+
+    def set_subscription(self, body: dict) -> dict[str, Any]:
+        """keep (never suggest it again), unsubscribed (you left it), or active (undo)."""
+        status = body.get('status')
+        if status not in ('keep', 'unsubscribed', 'active'):
+            raise ValueError('status must be keep, unsubscribed or active')
+        self.store.set_subscription_status(self.account, body.get('key') or '', status, by='user',
+                                           reason='set in the dashboard')
+        return {'ok': True}
+
     def summaries(self) -> list[dict[str, Any]]:
         """Recent summaries; items already added to Calendar carry 'calendar'."""
         added = self.store.calendar_events(self.account)
@@ -467,6 +508,7 @@ def make_handler(api: Api, allowed_hosts: set[str]) -> type[BaseHTTPRequestHandl
                 '/api/needs-you': api.needs_you,
                 '/api/auth': api.auth_status,
                 '/api/stats': api.stats,
+                '/api/unsubscribe': api.unsubscribe_suggestions,
             }
             if url.path not in routes:
                 return self._send(HTTPStatus.NOT_FOUND, {'error': 'not found'})
@@ -504,6 +546,8 @@ def make_handler(api: Api, allowed_hosts: set[str]) -> type[BaseHTTPRequestHandl
                 self._run(api.write_summary)
             elif path == '/api/auth/start':
                 self._run(lambda: api.start_signin(body))
+            elif path == '/api/subscriptions':
+                self._run(lambda: api.set_subscription(body))
             elif path == '/api/done':
                 self._run(lambda: api.set_done(body))
             elif path == '/api/calendar':
@@ -536,7 +580,8 @@ def make_handler(api: Api, allowed_hosts: set[str]) -> type[BaseHTTPRequestHandl
             try:
                 result = fn()
             except (ValueError, KeyError) as err:
-                return self._send(HTTPStatus.BAD_REQUEST, {'error': str(err)})
+                # str() of a KeyError quotes its message; use the message itself.
+                return self._send(HTTPStatus.BAD_REQUEST, {'error': str(err.args[0]) if err.args else str(err)})
             except Exception:
                 log.exception('dashboard request failed: %s', self.path)
                 return self._send(HTTPStatus.INTERNAL_SERVER_ERROR, {'error': 'server error'})

@@ -171,6 +171,18 @@ details.table-view td:first-child, details.table-view th:first-child { text-alig
   border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.15); display: none; min-width: 140px; }
 #tip .row { display: flex; justify-content: space-between; gap: 12px; }
 #tip .row span:first-child::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; background: var(--c); }
+/* Unsubscribe suggestions */
+.sec-h.unsub { color: var(--muted); }
+.unsub-row { display: grid; grid-template-columns: 1fr auto; gap: 10px 14px; align-items: center; padding: 12px 14px; border-top: 1px solid var(--line); }
+.unsub-row:first-child { border-top: 0; }
+.unsub-row .who { font-weight: 650; overflow-wrap: anywhere; }
+.unsub-row .why { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.unsub-row .last { font-size: 12px; margin-top: 3px; overflow-wrap: anywhere; }
+.unsub-row .last a { color: var(--accent); text-decoration: none; }
+.rate { display: inline-block; font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums; margin-right: 6px; }
+.unsub-row.settled { opacity: .55; }
+.unsub-row.settled .who { text-decoration: line-through; }
+@media (max-width: 560px) { .unsub-row { grid-template-columns: 1fr; } }
 .banner { max-width: 1200px; margin: 12px auto 0; padding: 0 16px; }
 .banner > div { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap;
   background: var(--bad-soft); color: var(--bad); border: 1px solid var(--bad); border-radius: 10px; padding: 10px 14px; font-weight: 600; }
@@ -277,9 +289,17 @@ dialog select, dialog input[type=text] { width: 100%; }
   </section>
 
   <section id="review">
-    <p class="note">The models weren't sure about these. Pick a label (the best guess is preselected) and save, or leave them.</p>
-    <div class="panel"><table><thead><tr><th>Email</th><th>Label</th><th class="hide-sm">Why</th></tr></thead>
-      <tbody id="review-rows"></tbody></table></div>
+    <div class="sec" style="margin-top:0">
+      <div class="sec-h needs">Labels to check <span class="hint">the models weren't sure: pick a label and save</span></div>
+      <div class="panel"><table><thead><tr><th>Email</th><th>Label</th><th class="hide-sm">Why</th></tr></thead>
+        <tbody id="review-rows"></tbody></table></div>
+    </div>
+    <div class="sec" id="sec-unsub">
+      <div class="sec-h unsub">Unsubscribe suggestions <span class="hint" id="unsub-hint"></span></div>
+      <p class="note" style="margin-top:0">Lists you rarely open, from the last 90 days, busiest first. Starred lists and ones newer
+        than 3 weeks are never suggested. Unsubscribe page opens the list's own page; then mark it. Keep hides a list for good.</p>
+      <div class="panel" id="unsub-list"></div>
+    </div>
   </section>
 
   <section id="recent">
@@ -589,11 +609,56 @@ function labelPicker(r, {confirm}) {
 }
 async function loadReview() {
   await ensureLabels();
-  const rows = await api('/api/decisions?view=review&limit=300');
+  const [rows, unsub] = await Promise.all([api('/api/decisions?view=review&limit=300'), api('/api/unsubscribe')]);
   $('#review-rows').replaceChildren(...(rows.length ? rows.map(r => el('tr', {},
     emailCell(r), el('td', {}, labelPicker(r, {confirm: false})),
     el('td', {class: 'reason hide-sm'}, r.reason || ''))) :
     [el('tr', {}, el('td', {colspan: 3, class: 'empty'}, 'Nothing waiting for review.'))]));
+  renderUnsubscribe(unsub);
+}
+function renderUnsubscribe(data) {
+  const lists = data.lists;
+  const hint = () => {
+    const open = lists.filter(l => !l.settled);
+    $('#unsub-hint').textContent = open.length
+      ? `${open.length} lists · ~${Math.round(open.reduce((a, l) => a + l.per_week, 0))} emails a week` + (data.kept ? ` · ${data.kept} kept` : '')
+      : 'all handled';
+  };
+  hint();
+  $('#unsub-list').replaceChildren(...(lists.length ? lists.map(l => {
+    const row = el('div', {class: 'unsub-row'});
+    const set = async (status, label) => {
+      try {
+        await api('/api/subscriptions', {key: l.key, status});
+        l.settled = status !== 'active';
+        row.classList.toggle('settled', l.settled);
+        actions.replaceChildren(...(l.settled
+          ? [el('span', {class: 'chip ' + (status === 'keep' ? 'ok-chip' : 'by-review')}, label),
+             el('button', {class: 'undo', onclick: () => set('active', '')}, 'Undo')]
+          : buttons()));
+        hint(); toast(label || 'Back in suggestions');
+      } catch (e) { toast(e.message); }
+    };
+    // Unsubscribe links come from the sender's headers; open them in a new tab only.
+    const buttons = () => [
+      l.url ? el('a', {class: 'cal', href: l.url, target: '_blank', rel: 'noopener noreferrer nofollow',
+                       title: l.one_click ? 'Supports one-click unsubscribe' : 'The list\'s unsubscribe page'}, 'Unsubscribe page ↗')
+            : l.mailto ? el('a', {class: 'cal', href: l.mailto, rel: 'noopener noreferrer'}, 'Unsubscribe by email ↗') : null,
+      el('button', {class: 'btn', onclick: () => set('unsubscribed', 'unsubscribed')}, 'Mark unsubscribed'),
+      el('button', {class: 'btn', onclick: () => set('keep', 'kept')}, 'Keep')];
+    const actions = el('div', {class: 'actions', style: 'justify-content:flex-end'}, ...buttons());
+    const name = (l.sender || '').replace(/\s*<.*>$/, '').replace(/^"|"$/g, '') || l.sender_email;
+    row.append(
+      el('div', {},
+        el('div', {class: 'who'}, name, ' ', el('span', {class: 'when'}, l.sender_email)),
+        el('div', {class: 'why'}, el('span', {class: 'rate'}, `~${l.per_week.toFixed(1)}/week`),
+           `opened ${l.read} of ${l.received} · `, l.rule === 'rule:promo_unread' ? 'promotions you rarely open'
+             : l.rule === 'rule:noisy_updates' ? 'frequent notifications you rarely open' : 'you open these late, if at all'),
+        l.last_id ? el('div', {class: 'last'}, 'Latest: ',
+          gmailLink(l.last_id, l.last_subject || '(no subject)', false), el('span', {class: 'when'}, ` · ${received(l.last_received)}`)) : null),
+      actions);
+    return row;
+  }) : [el('div', {class: 'empty'}, 'No suggestions: every list you get, you read.')]));
 }
 let recentView = 'all';
 $('#recent-filters').addEventListener('click', e => {
