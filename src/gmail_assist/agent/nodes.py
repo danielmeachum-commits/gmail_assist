@@ -170,8 +170,6 @@ def review_subscription(state: EmailState, runtime: Runtime[Context]) -> dict:
 
 def choose_model(state: EmailState) -> dict:
     """Every message starts on the local model."""
-    # TODO: if some mail should skip straight to STRONG_MODEL (very long
-    # bodies, particular senders), decide that here.
     return {'model': LOCAL_MODEL, 'effort': None}
 
 

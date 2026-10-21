@@ -1,10 +1,15 @@
 import argparse
 import logging
 import os
+import sys
 
 from dotenv import load_dotenv
 
-from gmail_assist.gmail.auth import get_service
+from gmail_assist.gmail.auth import AuthRequired, get_service
+
+# sysexits.h EX_CONFIG. The systemd unit won't restart on it: restarting
+# can't fix a missing sign-in.
+EXIT_AUTH = 78
 
 
 def labels() -> None:
@@ -39,7 +44,8 @@ def serve(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     if not args.topic or not args.audience:
         parser.error('serve needs --topic and --audience (or GMAIL_ASSIST_TOPIC / GMAIL_ASSIST_PUSH_AUDIENCE)')
     serve(get_service('read'), args.topic, args.audience, args.service_account,
-          host=args.host, port=args.port, path=args.path, db=args.db)
+          host=args.host, port=args.port, path=args.path, db=args.db,
+          triage=not args.no_triage, workers=args.workers)
 
 
 def process(args: argparse.Namespace) -> None:
@@ -47,7 +53,8 @@ def process(args: argparse.Namespace) -> None:
     from gmail_assist.store import Store
 
     with Store(args.db) as store:
-        counts = process(get_service('read'), store, limit=args.limit, kind=args.kind)
+        counts = process(get_service('read'), store, limit=args.limit, kind=args.kind,
+                         workers=args.workers)
         print(f'Processed: {counts}. Queue: {store.counts()}')
 
 
@@ -94,14 +101,28 @@ def main() -> None:
     p.add_argument('--host', default='127.0.0.1', help='bind address; the tunnel connects here')
     p.add_argument('--port', type=int, default=8080)
     p.add_argument('--path', default='/gmail/push')
+    p.add_argument('--no-triage', action='store_true',
+                   help="only sync; don't run new mail through the triage graph")
+    p.add_argument('--workers', type=int, default=4,
+                   help='messages triaged in parallel (default 4); match llama-server -np')
     p.add_argument('--db', help='store path (default: ~/.local/share/gmail_assist/store.db)')
     p = sub.add_parser('process', help='run pending messages through the triage graph (dry run)')
     p.add_argument('--limit', type=int, default=20)
     p.add_argument('--kind', choices=['personal', 'bulk'])
+    p.add_argument('--workers', type=int, default=4,
+                   help='messages processed in parallel (default 4); match llama-server -np')
     p.add_argument('--db', help='store path (default: ~/.local/share/gmail_assist/store.db)')
     args = parser.parse_args()
 
     setup_logging(args.verbose)
+    try:
+        run_command(args, parser)
+    except AuthRequired as err:
+        print(f'gmail-assist: {err}', file=sys.stderr)
+        sys.exit(EXIT_AUTH)
+
+
+def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     if args.command == 'sync':
         sync(args)
     elif args.command == 'serve':

@@ -7,9 +7,11 @@ Each message is also traced to LangSmith (project 'gmail-assist') when
 LANGSMITH_API_KEY is set in .env. Traces include the email contents the
 model sees; set LANGSMITH_TRACING=false to turn tracing off with the key set.
 """
+import contextvars
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import langsmith as ls
@@ -60,10 +62,22 @@ def _summarize(update: dict[str, Any]) -> str:
     return '; '.join(parts) or '(no changes)'
 
 
-def run_graph(graph, msg: Message, ctx: Context) -> EmailState:
+def run_graph(graph, msg: Message, ctx: Context, live: bool = True) -> EmailState:
     """Run one message through the graph, logging each node as it finishes.
-    Returns the final state, like graph.invoke()."""
-    trace.info('▶ %s [%s] %s', msg.id, msg.kind, (msg.subject or '')[:70])
+    Returns the final state, like graph.invoke().
+
+    With live=False the trace lines are held and printed together at the
+    end, so messages running in parallel don't interleave their output.
+    """
+    lines: list[str] = []
+
+    def emit(fmt: str, *args) -> None:
+        if live:
+            trace.info(fmt, *args)
+        else:
+            lines.append(fmt % args)
+
+    emit('▶ %s [%s] %s', msg.id, msg.kind, (msg.subject or '')[:70])
     started = last = time.monotonic()
     final: EmailState = {}
     config = {
@@ -74,21 +88,32 @@ def run_graph(graph, msg: Message, ctx: Context) -> EmailState:
         'metadata': {'message_id': msg.id, 'kind': msg.kind,
                      'subscription_key': msg.subscription_key},
     }
-    for mode, chunk in graph.stream(
-        initial_state(msg), context=ctx, config=config, stream_mode=['updates', 'values'],
-    ):
-        if mode == 'values':
-            final = chunk
-            continue
-        now = time.monotonic()
-        for node, update in chunk.items():
-            trace.info('  %-20s %5.1fs  %s', node, now - last, _summarize(update or {}))
-        last = now
-    trace.info('  done in %.1fs', time.monotonic() - started)
+    try:
+        for mode, chunk in graph.stream(
+            initial_state(msg), context=ctx, config=config, stream_mode=['updates', 'values'],
+        ):
+            if mode == 'values':
+                final = chunk
+                continue
+            now = time.monotonic()
+            for node, update in chunk.items():
+                emit('  %-20s %5.1fs  %s', node, now - last, _summarize(update or {}))
+            last = now
+        emit('  done in %.1fs', time.monotonic() - started)
+    finally:
+        # On failure too, so the steps that did run are visible.
+        if lines:
+            trace.info('\n'.join(lines))
     return final
 
 
-def process(service, store: Store, limit: int = 20, kind: Kind | None = None) -> dict[str, int]:
+def process(service, store: Store, limit: int = 20, kind: Kind | None = None,
+            workers: int = 4, since_ms: int | None = None) -> dict[str, int]:
+    """`workers` messages run through the graph at once. Match it to the
+    local server's parallel slots (llama-server -np N); more workers than
+    slots just queue at the server. `since_ms` only takes mail received at
+    or after that time (serve uses it to skip the backlog)."""
+    # The Gmail client isn't thread-safe: use it here, before any workers.
     account = service.users().getProfile(userId='me').execute()['emailAddress']
     ctx = Context(store=store, account=account, labels=user_labels(service))
     graph = build_graph()
@@ -101,34 +126,48 @@ def process(service, store: Store, limit: int = 20, kind: Kind | None = None) ->
         app_logger.addHandler(log_handler)
     try:
         with ls.tracing_context(enabled=traced, project_name=LANGSMITH_PROJECT):
-            return _process_batch(graph, store, ctx, limit, kind)
+            messages = store.claim_batch(limit, account=account, kind=kind, since_ms=since_ms)
+            if workers <= 1:
+                outcomes = [_process_one(graph, store, ctx, msg, live=True) for msg in messages]
+            else:
+                with ThreadPoolExecutor(max_workers=workers, thread_name_prefix='triage') as pool:
+                    # Threads don't inherit context variables, which is where
+                    # tracing_context keeps its settings: give each task its
+                    # own copy so traces still go to the right project.
+                    futures = [
+                        pool.submit(contextvars.copy_context().run,
+                                    _process_one, graph, store, ctx, msg, False)
+                        for msg in messages
+                    ]
+                    outcomes = [f.result() for f in futures]
     finally:
         if traced:
             app_logger.removeHandler(log_handler)
             # Traces upload in the background; don't let the CLI exit first.
             wait_for_all_tracers()
+    return {'done': outcomes.count('done'), 'failed': outcomes.count('failed')}
 
 
-def _process_batch(graph, store: Store, ctx: Context, limit: int,
-                   kind: Kind | None) -> dict[str, int]:
+def _process_one(graph, store: Store, ctx: Context, msg: Message, live: bool) -> str:
+    """Run one message and record the outcome. Returns 'done' or 'failed'."""
     account = ctx.account
-    counts = {'done': 0, 'failed': 0}
-    for msg in store.claim_batch(limit, account=account, kind=kind):
-        try:
-            out = run_graph(graph, msg, ctx)
-            for d in out['decisions']:
-                store.record_decision(account, msg.id, **d)
-            if flag := out.get('subscription_flag'):
-                store.set_subscription_status(
-                    account, msg.subscription_key, flag['status'],
-                    by=flag['by'], reason=flag['reason'], only_from='active',
-                )
-            store.mark_done(account, msg.id, result={
-                'decisions': out['decisions'], 'attempts': out.get('attempts', []),
-            })
-            counts['done'] += 1
-        except Exception as err:
-            log.exception('message %s failed', msg.id)
-            store.mark_failed(account, msg.id, f'{type(err).__name__}: {err}')
-            counts['failed'] += 1
-    return counts
+    try:
+        out = run_graph(graph, msg, ctx, live=live)
+        for d in out['decisions']:
+            store.record_decision(account, msg.id, **d)
+        if flag := out.get('subscription_flag'):
+            store.set_subscription_status(
+                account, msg.subscription_key, flag['status'],
+                by=flag['by'], reason=flag['reason'], only_from='active',
+            )
+        store.mark_done(account, msg.id, result={
+            'decisions': out['decisions'], 'attempts': out.get('attempts', []),
+        })
+        return 'done'
+    except Exception as err:
+        # One line per failure: when the model server is down every message
+        # fails the same way. The traceback is in LangSmith, or with DEBUG.
+        log.error('message %s failed: %s: %s', msg.id, type(err).__name__, err)
+        log.debug('traceback for %s', msg.id, exc_info=True)
+        store.mark_failed(account, msg.id, f'{type(err).__name__}: {err}')
+        return 'failed'

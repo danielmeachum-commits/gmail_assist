@@ -1,0 +1,21 @@
+# Gmail push sync + triage (`gmail-assist serve`). Reads .env from the repo.
+#
+# Wants= rather than Requires=: if llama-server stops, sync keeps running and
+# triage failures are requeued on serve's 30-minute backstop.
+[Unit]
+Description=gmail-assist: Gmail push sync and triage
+Wants=llama-server.service
+After=llama-server.service
+
+[Service]
+WorkingDirectory=/ssd/repos/gmail_assist
+ExecStart=/home/hobbes/.local/bin/uv run --frozen gmail-assist -v serve
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=10
+# 78 = Gmail sign-in needed (token missing or revoked). Restarting can't fix
+# that, so stop and show the unit as failed; the journal says what to run.
+RestartPreventExitStatus=78
+
+[Install]
+WantedBy=default.target

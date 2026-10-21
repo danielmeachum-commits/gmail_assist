@@ -385,13 +385,16 @@ class Store:
     # -- batch processing queue ---------------------------------------------
 
     def claim_batch(self, limit: int = 50, account: str | None = None,
-                    kind: Kind | None = None) -> list[Message]:
-        """Atomically move up to `limit` pending messages to 'processing'."""
+                    kind: Kind | None = None, since_ms: int | None = None) -> list[Message]:
+        """Atomically move up to `limit` pending messages to 'processing'.
+        `since_ms` limits it to mail received at or after that time."""
         pending = select(Message.account, Message.id).where(Message.status == 'pending')
         if account:
             pending = pending.where(Message.account == account)
         if kind:
             pending = pending.where(Message.kind == kind)
+        if since_ms is not None:
+            pending = pending.where(Message.internal_date >= since_ms)
         pending = pending.order_by(Message.internal_date).limit(limit)
 
         with self.Session.begin() as s:
@@ -441,6 +444,13 @@ class Store:
                 .values(status='pending', claimed_at=None)
             )
         return res.rowcount
+
+    def pending_count(self, account: str, since_ms: int | None = None) -> int:
+        q = select(func.count()).where(Message.account == account, Message.status == 'pending')
+        if since_ms is not None:
+            q = q.where(Message.internal_date >= since_ms)
+        with self.Session() as s:
+            return s.scalar(q)
 
     def counts(self) -> dict[str, int]:
         with self.Session() as s:

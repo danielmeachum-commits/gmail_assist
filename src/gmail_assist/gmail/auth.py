@@ -4,9 +4,14 @@ Two grants are kept separately so most work runs with a read-only token:
   - 'read':   gmail.readonly
   - 'modify': gmail.modify (apply labels, archive, trash -- and send mail)
 Only ask for 'modify' at the point a write is actually needed.
+
+Signing in needs a browser, so it only happens from a terminal. Anywhere
+else (systemd, cron) a missing or revoked token raises AuthRequired instead
+of waiting forever for a browser that will never open.
 """
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Literal
 
@@ -24,6 +29,16 @@ SCOPES: dict[Access, list[str]] = {
 }
 
 OAUTH_PORT = 38991
+
+
+class AuthRequired(RuntimeError):
+    """No usable token, and signing in needs someone at a terminal."""
+
+    def __init__(self, access: 'Access'):
+        super().__init__(
+            f"Gmail '{access}' access needs signing in again (token missing, expired or "
+            f"revoked). Run `uv run gmail-assist labels` from a terminal to sign in."
+        )
 
 
 def _config_dir() -> Path:
@@ -65,7 +80,11 @@ def _save_token(access: Access, creds: Credentials) -> None:
     os.chmod(path, 0o600)
 
 
-def get_credentials(access: Access = 'read') -> Credentials:
+def get_credentials(access: Access = 'read', interactive: bool | None = None) -> Credentials:
+    """Load, refresh or (interactively) obtain a token. `interactive`
+    defaults to whether stdin is a terminal."""
+    if interactive is None:
+        interactive = sys.stdin.isatty()
     scopes = SCOPES[access]
     creds = _load_token(access)
 
@@ -85,6 +104,8 @@ def get_credentials(access: Access = 'read') -> Credentials:
             creds = None
 
     if creds is None:
+        if not interactive:
+            raise AuthRequired(access)
         flow = InstalledAppFlow.from_client_secrets_file(str(_client_secrets_path()), scopes)
         creds = flow.run_local_server(port=OAUTH_PORT)
         _save_token(access, creds)

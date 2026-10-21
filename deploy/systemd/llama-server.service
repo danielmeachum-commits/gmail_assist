@@ -1,0 +1,15 @@
+# Local model for gmail-assist's triage graph (LOCAL_MODEL in agent/nodes.py).
+# Port 8081 keeps it off 8080, where gmail-assist serve receives Gmail pushes.
+# -np 4 matches serve's default --workers 4; -c is split across the slots.
+[Unit]
+Description=llama.cpp server (gemma-3-4b-it) for gmail-assist
+
+[Service]
+ExecStart=/ssd/repos/llama.cpp/build/bin/llama-server \
+    -hf ggml-org/gemma-3-4b-it-qat-GGUF \
+    --host 127.0.0.1 --port 8081 -c 8192 -np 4 -fa on
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

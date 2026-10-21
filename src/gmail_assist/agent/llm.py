@@ -10,6 +10,7 @@ nodes.choose_model); .env only says how to reach each provider:
 Specs look like "local:qwen3:8b" or "anthropic:claude-opus-5-5".
 """
 import os
+import threading
 from dataclasses import dataclass, field
 
 from langchain_core.language_models import BaseChatModel
@@ -83,6 +84,8 @@ _CREDENTIALS = {'local': 'GMAIL_ASSIST_LLM_BASE_URL', 'anthropic': 'ANTHROPIC_AP
 class Models:
     """Builds and caches chat models so each message doesn't open a new client."""
     _cache: dict[tuple[str, str | None], LLM] = field(default_factory=dict)
+    # process --workers calls get() from several threads at once.
+    _lock: threading.Lock = field(default_factory=threading.Lock)
 
     @staticmethod
     def configured(provider: str) -> bool:
@@ -92,12 +95,13 @@ class Models:
     def get(self, spec: str, effort: str | None = None) -> LLM:
         """`effort` (low | medium | high | xhigh | max) applies to Claude only."""
         key = (spec, effort)
-        if key not in self._cache:
-            # Split on the first colon only: Ollama tags contain one ("qwen3:8b").
-            provider, _, model = spec.partition(':')
-            if provider not in _BUILDERS or not model:
-                raise ValueError(f'bad model spec {spec!r}; use "<{"|".join(PROVIDERS)}>:<model>"')
-            if not self.configured(provider):
-                raise ValueError(f'{spec} needs {_CREDENTIALS[provider]} in .env')
-            self._cache[key] = LLM(_BUILDERS[provider](model, effort), provider, model)
-        return self._cache[key]
+        with self._lock:
+            if key not in self._cache:
+                # Split on the first colon only: Ollama tags contain one ("qwen3:8b").
+                provider, _, model = spec.partition(':')
+                if provider not in _BUILDERS or not model:
+                    raise ValueError(f'bad model spec {spec!r}; use "<{"|".join(PROVIDERS)}>:<model>"')
+                if not self.configured(provider):
+                    raise ValueError(f'{spec} needs {_CREDENTIALS[provider]} in .env')
+                self._cache[key] = LLM(_BUILDERS[provider](model, effort), provider, model)
+            return self._cache[key]
