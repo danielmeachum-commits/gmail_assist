@@ -30,9 +30,8 @@ from googleapiclient.discovery import build
 
 from gmail_assist.gmail.auth import get_credentials
 from gmail_assist.store import Store
-from gmail_assist.sync import batch_call
 
-TRASH_COST = 5      # quota units per messages.trash / untrash
+BATCH_MODIFY_MAX = 1000     # Gmail's limit on ids per batchModify
 
 TIMEOUT_S = 15
 USER_AGENT = 'gmail-assist (RFC 8058 one-click unsubscribe)'
@@ -90,35 +89,37 @@ def _gmail(access: str):
                  cache_discovery=False)
 
 
-def trash_lists(store: Store, account: str, keys: list[str]) -> dict[str, int]:
-    """Move these lists' emails to Trash. Returns how many per list."""
+def _batch_modify(gmail, ids: list[str], add: list[str], remove: list[str], progress=None) -> None:
+    """Change labels on many messages, BATCH_MODIFY_MAX per call (one call
+    costs what ten single trash calls would)."""
+    for start in range(0, len(ids), BATCH_MODIFY_MAX):
+        chunk = ids[start:start + BATCH_MODIFY_MAX]
+        body = {'ids': chunk, 'addLabelIds': add, 'removeLabelIds': remove}
+        gmail.users().messages().batchModify(userId='me', body=body).execute(num_retries=5)
+        if progress:
+            progress(len(chunk))
+
+
+def trash_lists(store: Store, account: str, keys: list[str], progress=None) -> dict[str, int]:
+    """Move these lists' emails to Trash (adding TRASH and dropping INBOX is
+    what messages.trash does, checked against it). Returns how many per
+    list; `progress(n)` is called as batches finish."""
     todo = {key: store.list_message_ids(account, key) for key in keys}
     ids = [mid for messages in todo.values() for mid, _ in messages]
-    if not ids:
-        return {key: 0 for key in keys}
-    gmail = _gmail('modify')
-    done = batch_call(gmail, ids, lambda i: gmail.users().messages().trash(userId='me', id=i), TRASH_COST)
-    counts = {}
+    if ids:
+        _batch_modify(_gmail('modify'), ids, ['TRASH'], ['INBOX'], progress)
     for key, messages in todo.items():
-        trashed = [(mid, inbox) for mid, inbox in messages if mid in done]
-        store.add_trashed(account, key, trashed)
-        counts[key] = len(trashed)
-    return counts
+        store.add_trashed(account, key, messages)
+    return {key: len(messages) for key, messages in todo.items()}
 
 
 def restore_list(store: Store, account: str, key: str) -> int:
-    """Take a list's emails back out of Trash (to the inbox if they were
-    there). Returns how many."""
+    """Take a list's emails back out of Trash, into the inbox if they were
+    there before. Returns how many."""
     messages = store.take_trashed(account, key)
     if not messages:
         return 0
     gmail = _gmail('modify')
-    batch_call(gmail, [m for m, _ in messages],
-               lambda i: gmail.users().messages().untrash(userId='me', id=i), TRASH_COST)
-    # Trash drops INBOX and untrash doesn't add it back: do that for the
-    # ones that were in the inbox.
-    inbox = [m for m, had in messages if had]
-    for start in range(0, len(inbox), 1000):
-        gmail.users().messages().batchModify(
-            userId='me', body={'ids': inbox[start:start + 1000], 'addLabelIds': ['INBOX']}).execute()
+    _batch_modify(gmail, [m for m, had in messages if had], ['INBOX'], ['TRASH'])
+    _batch_modify(gmail, [m for m, had in messages if not had], [], ['TRASH'])
     return len(messages)

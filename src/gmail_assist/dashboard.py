@@ -55,6 +55,8 @@ PORT = 8090
 MAX_BODY = 64 * 1024
 # One-click unsubscribes per request, and how many run at once.
 MAX_BULK = 300
+# Lists you left stay in the suggestions (marked, with Undo) this long.
+RECENTLY_LEFT_DAYS = 14
 UNSUBSCRIBE_WORKERS = 4
 CSRF_HEADER = 'X-Gmail-Assist'
 GRANTS = ('read', 'modify', 'calendar')
@@ -149,6 +151,76 @@ def _summary_row(s: Summary) -> dict[str, Any]:
             'model': s.model, 'tz': local_zone(), **s.content}
 
 
+class UnsubscribeJob(threading.Thread):
+    """One bulk unsubscribe run, in the background so the page can show
+    progress and pick it up again after a reload. Each list goes queued ->
+    sending -> unsubscribed / failed; then, if asked, the accepted lists'
+    emails go to Trash."""
+
+    def __init__(self, api: 'Api', keys: list[str], trash: bool):
+        super().__init__(name='unsubscribe', daemon=True)
+        self.api, self.trash = api, trash
+        self.started_at = datetime.now(timezone.utc)
+        self.lists = {k: {'key': k, 'state': 'queued', 'detail': None, 'trashed': 0} for k in keys}
+        self.phase = 'unsubscribing'
+        self.trash_total = self.trash_done = 0
+        self.error: str | None = None
+        self.finished = False
+        self._lock = threading.Lock()
+
+    def _set(self, key: str, **changes) -> None:
+        with self._lock:
+            self.lists[key].update(changes)
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {'started_at': self.started_at.isoformat(), 'phase': self.phase, 'trash': self.trash,
+                    'trash_total': self.trash_total, 'trash_done': self.trash_done,
+                    'error': self.error, 'finished': self.finished,
+                    'lists': [dict(v) for v in self.lists.values()]}
+
+    def run(self) -> None:
+        api = self.api
+        try:
+            subs = {s.key: s for s in api.store.subscriptions(api.account)}
+            latest = api.store.latest_by_list(api.account)
+
+            def one(key: str) -> None:
+                self._set(key, state='sending')
+                ok, detail = api._one_click(key, subs.get(key), latest.get(key))
+                self._set(key, state='unsubscribed' if ok else 'failed', detail=detail)
+                if not ok:
+                    log.info('one-click unsubscribe from %s refused: %s', key, detail)
+
+            with ThreadPoolExecutor(max_workers=UNSUBSCRIBE_WORKERS) as pool:
+                list(pool.map(one, list(self.lists)))
+            left = [k for k, v in self.lists.items() if v['state'] == 'unsubscribed']
+            log.info('one-click unsubscribe: %d of %d accepted', len(left), len(self.lists))
+            if self.trash and left:
+                with self._lock:
+                    self.phase = 'trashing'
+                    self.trash_total = sum(len(api.store.list_message_ids(api.account, k)) for k in left)
+
+                def progress(n: int) -> None:
+                    with self._lock:
+                        self.trash_done += n
+
+                try:
+                    moved = unsubscribe.trash_lists(api.store, api.account, left, progress)
+                    for k, n in moved.items():
+                        self._set(k, trashed=n)
+                except AuthRequired:
+                    with self._lock:
+                        self.error = 'Emails not moved: Gmail change access is needed (connect it in Settings)'
+        except Exception as err:
+            log.exception('unsubscribe run failed')
+            with self._lock:
+                self.error = f'The run stopped: {type(err).__name__}: {err}'
+        finally:
+            with self._lock:
+                self.phase, self.finished = 'done', True
+
+
 class Api:
     """The dashboard's JSON endpoints, over one store and account."""
 
@@ -156,6 +228,10 @@ class Api:
         self.store = store
         self.account = account
         self.signins = SignIns()
+        # The latest bulk unsubscribe run (kept after it finishes, so a
+        # reloaded page can still show how it went).
+        self.job: UnsubscribeJob | None = None
+        self._job_lock = threading.Lock()
 
     def auth_status(self) -> dict[str, Any]:
         return {'grants': {g: auth.status(g) for g in GRANTS},
@@ -271,15 +347,22 @@ class Api:
         or already left aren't suggested."""
         now = datetime.now(timezone.utc)
         latest = self.store.latest_by_list(self.account)
+        trashed = self.store.trashed_counts(self.account)
         out, kept = [], 0
         for row in self.store.subscription_stats(self.account, days=nodes.STATS_DAYS):
             sub = row['subscription']
-            if sub.status in ('keep', 'unsubscribed'):
-                kept += sub.status == 'keep'
+            if sub.status == 'keep':
+                kept += 1
                 continue
             days_known = (now - sub.first_seen.replace(tzinfo=timezone.utc)).total_seconds() / 86400
             flag = nodes.unsubscribe_flag(row, days_known)
-            if not flag:
+            if sub.status == 'unsubscribed':
+                # Shown for a while after you leave, with Undo; then dropped.
+                when = sub.status_at.replace(tzinfo=timezone.utc) if sub.status_at else now
+                if now - when > timedelta(days=RECENTLY_LEFT_DAYS):
+                    continue
+                flag = flag or {'reason': sub.status_reason or '', 'by': 'user'}
+            elif not flag:
                 continue
             last = latest.get(sub.key)
             out.append({
@@ -293,12 +376,15 @@ class Api:
                 # Can be unsubscribed from here: one-click, over https, with an email to check DKIM on.
                 'auto': bool(sub.one_click and last
                              and any(u.startswith('https://') for u in sub.unsubscribe_urls)),
+                'unsubscribed': sub.status == 'unsubscribed',
+                'unsubscribed_by': sub.status_by if sub.status == 'unsubscribed' else None,
+                'trashed': trashed.get(sub.key, 0),
                 'last_subject': last.subject if last else None,
                 'last_received': _received(last) if last else None,
                 'last_id': last.id if last else None,
             })
         out.sort(key=lambda r: -r['per_week'])
-        return {'lists': out, 'per_week': sum(r['per_week'] for r in out), 'kept': kept}
+        return {'lists': out, 'kept': kept}
 
     def _keys(self, body: dict) -> list[str]:
         keys = body.get('keys')
@@ -338,44 +424,38 @@ class Api:
         moved = self._after_status(keys, status, bool(body.get('trash')))
         return {'ok': True, 'updated': len(keys), 'moved': moved}
 
-    def bulk_unsubscribe(self, body: dict) -> dict[str, Any]:
-        """Send one-click unsubscribes to the selected lists; those that
-        accept are marked unsubscribed. Returns a result per list."""
+    def start_unsubscribe(self, body: dict) -> dict[str, Any]:
+        """Start a background run of one-click unsubscribes for the selected
+        lists (and trashing their emails, if asked). Returns the run; poll
+        /api/jobs/latest for its progress. One run at a time."""
         keys = self._keys(body)
-        subs = {s.key: s for s in self.store.subscriptions(self.account)}
-        latest = self.store.latest_by_list(self.account)
+        with self._job_lock:
+            if self.job and not self.job.finished:
+                raise ValueError('an unsubscribe run is already going; wait for it to finish')
+            self.job = UnsubscribeJob(self, keys, bool(body.get('trash')))
+        self.job.start()
+        return self.job.snapshot()
 
-        def one(key: str) -> dict[str, Any]:
-            sub, last = subs.get(key), latest.get(key)
-            url = next((u for u in (sub.unsubscribe_urls if sub else []) if u.startswith('https://')), None)
-            if not sub or not sub.one_click or not url or not last:
-                return {'key': key, 'ok': False, 'detail': "doesn't support one-click unsubscribe"}
-            try:
-                detail = unsubscribe.one_click(url, last.id)
-            except unsubscribe.Refused as err:
-                return {'key': key, 'ok': False, 'detail': str(err)}
-            except AuthRequired:
-                return {'key': key, 'ok': False, 'detail': 'Gmail sign-in needed to check DKIM'}
-            except Exception as err:
-                log.warning('one-click unsubscribe from %s failed: %s: %s', key, type(err).__name__, err)
-                return {'key': key, 'ok': False, 'detail': f'failed: {type(err).__name__}'}
-            self.store.set_subscription_status(self.account, key, 'unsubscribed', by='one-click',
-                                               reason=f'one-click unsubscribe: {detail}')
-            return {'key': key, 'ok': True, 'detail': detail}
+    def latest_job(self) -> dict[str, Any] | None:
+        return self.job.snapshot() if self.job else None
 
-        with ThreadPoolExecutor(max_workers=UNSUBSCRIBE_WORKERS) as pool:
-            results = list(pool.map(one, keys))
-        log.info('one-click unsubscribe: %d of %d accepted', sum(r['ok'] for r in results), len(results))
-        left = [r['key'] for r in results if r['ok']]
-        trash_error = None
-        if body.get('trash') and left:
-            try:
-                moved = self._after_status(left, 'unsubscribed', True)
-                for r in results:
-                    r['trashed'] = moved.get(r['key'], 0)
-            except ValueError as err:
-                trash_error = str(err)   # unsubscribed anyway; say why the mail stayed
-        return {'results': results, 'trash_error': trash_error}
+    def _one_click(self, key: str, sub, last) -> tuple[bool, str]:
+        """Unsubscribe from one list; (accepted, what happened)."""
+        url = next((u for u in (sub.unsubscribe_urls if sub else []) if u.startswith('https://')), None)
+        if not sub or not sub.one_click or not url or not last:
+            return False, "doesn't support one-click unsubscribe"
+        try:
+            detail = unsubscribe.one_click(url, last.id)
+        except unsubscribe.Refused as err:
+            return False, str(err)
+        except AuthRequired:
+            return False, 'Gmail sign-in needed to check DKIM'
+        except Exception as err:
+            log.warning('one-click unsubscribe from %s failed: %s: %s', key, type(err).__name__, err)
+            return False, f'failed: {type(err).__name__}'
+        self.store.set_subscription_status(self.account, key, 'unsubscribed', by='one-click',
+                                           reason=f'one-click unsubscribe: {detail}')
+        return True, detail
 
     def set_subscription(self, body: dict) -> dict[str, Any]:
         """keep (never suggest it again), unsubscribed (you left it), or active (undo)."""
@@ -595,6 +675,7 @@ def make_handler(api: Api, allowed_hosts: set[str]) -> type[BaseHTTPRequestHandl
                 '/api/auth': api.auth_status,
                 '/api/stats': api.stats,
                 '/api/unsubscribe': api.unsubscribe_suggestions,
+                '/api/jobs/latest': api.latest_job,
             }
             if url.path not in routes:
                 return self._send(HTTPStatus.NOT_FOUND, {'error': 'not found'})
@@ -637,7 +718,7 @@ def make_handler(api: Api, allowed_hosts: set[str]) -> type[BaseHTTPRequestHandl
             elif path == '/api/subscriptions/bulk':
                 self._run(lambda: api.bulk_subscriptions(body))
             elif path == '/api/unsubscribe/one-click':
-                self._run(lambda: api.bulk_unsubscribe(body))
+                self._run(lambda: api.start_unsubscribe(body))
             elif path == '/api/done':
                 self._run(lambda: api.set_done(body))
             elif path == '/api/calendar':

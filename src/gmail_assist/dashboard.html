@@ -179,6 +179,18 @@ details.table-view td:first-child, details.table-view th:first-child { text-alig
 .unsub-bar .spacer { flex: 1; }
 .unsub-row input[type=checkbox], .unsub-bar input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--accent); }
 .unsub-row .err { color: var(--bad); font-size: 12px; margin-top: 3px; }
+.job { padding: 14px 16px; margin-bottom: 12px; border-left: 3px solid var(--accent); }
+.job.done { border-left-color: var(--good); } .job.problem { border-left-color: var(--warn); }
+.job h3 { margin: 0 0 8px; font-size: 14px; display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+.prog { height: 8px; border-radius: 4px; background: var(--chip); overflow: hidden; margin: 6px 0; }
+.prog > div { height: 100%; background: var(--accent); border-radius: 4px; transition: width .4s; }
+.job.done .prog > div { background: var(--good); }
+.job .counts { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.job .counts b { color: var(--text); font-variant-numeric: tabular-nums; }
+.job ul { margin: 8px 0 0; padding-left: 18px; font-size: 12px; max-height: 180px; overflow: auto; }
+.job li { margin: 2px 0; overflow-wrap: anywhere; } .job li span { color: var(--bad); }
+.job .err-line { color: var(--bad); font-size: 12px; margin-top: 6px; }
+.chip.sending { background: var(--accent-soft); color: var(--accent); }
 .unsub-row { display: grid; grid-template-columns: auto 1fr auto; gap: 10px 14px; align-items: center; padding: 12px 14px; border-top: 1px solid var(--line); }
 .unsub-row:first-child { border-top: 0; }
 .unsub-row .who { font-weight: 650; overflow-wrap: anywhere; }
@@ -306,6 +318,7 @@ dialog select, dialog input[type=text] { width: 100%; }
         than 3 weeks are never suggested. Lists marked <b>one-click</b> can be unsubscribed from here: select them and
         Unsubscribe sends each list the standard one-click request (only to public https addresses, and only if Gmail
         verified the list's email). Others: open their page, then mark them. Keep hides a list for good.</p>
+      <div class="panel job" id="unsub-job" hidden></div>
       <div class="panel" id="unsub-list"></div>
     </div>
   </section>
@@ -617,23 +630,29 @@ function labelPicker(r, {confirm}) {
 }
 async function loadReview() {
   await ensureLabels();
-  const [rows, unsub] = await Promise.all([api('/api/decisions?view=review&limit=300'), api('/api/unsubscribe')]);
+  const [rows, unsub, job] = await Promise.all([api('/api/decisions?view=review&limit=300'), api('/api/unsubscribe'),
+                                                api('/api/jobs/latest')]);
   $('#review-rows').replaceChildren(...(rows.length ? rows.map(r => el('tr', {},
     emailCell(r), el('td', {}, labelPicker(r, {confirm: false})),
     el('td', {class: 'reason hide-sm'}, r.reason || ''))) :
     [el('tr', {}, el('td', {colspan: 3, class: 'empty'}, 'Nothing waiting for review.'))]));
   renderUnsubscribe(unsub);
+  if (job) followJob(job);      // a run in progress (or just finished) survives a reload
 }
+// -- unsubscribe suggestions -----------------------------------------------------------
+let UNSUB = null;          // {lists, rows, sync, settle} of the list on screen
+let jobTimer = null;
 function renderUnsubscribe(data) {
   const lists = data.lists;
+  for (const l of lists) l.settled = l.unsubscribed;
   const selected = new Set();
   const rows = new Map();          // key -> {row, box, actions, err}
   const open = () => lists.filter(l => !l.settled);
   const hint = () => {
-    const o = open();
-    $('#unsub-hint').textContent = o.length
-      ? `${o.length} lists · ~${Math.round(o.reduce((a, l) => a + l.per_week, 0))} emails a week` + (data.kept ? ` · ${data.kept} kept` : '')
-      : 'all handled';
+    const o = open(), gone = lists.length - o.length;
+    $('#unsub-hint').textContent = (o.length
+      ? `${o.length} lists · ~${Math.round(o.reduce((a, l) => a + l.per_week, 0))} emails a week`
+      : 'all handled') + (gone ? ` · ${gone} unsubscribed` : '') + (data.kept ? ` · ${data.kept} kept` : '');
   };
   // -- toolbar
   const count = el('span', {class: 'count'});
@@ -648,11 +667,12 @@ function renderUnsubscribe(data) {
   trashBox.addEventListener('change', () => { try { localStorage.setItem('unsubTrash', trashBox.checked ? '1' : '0'); } catch (e) {} });
   const leftLabel = (n) => n ? `unsubscribed · ${n} trashed` : 'unsubscribed';
   const autoOpen = () => open().filter(l => l.auto);
+  let running = false;
   const sync = () => {
     const n = selected.size, autos = [...selected].filter(k => lists.find(l => l.key === k).auto).length;
     count.textContent = n ? `${n} selected` : '';
-    go.textContent = autos ? `Unsubscribe ${autos}` : 'Unsubscribe';
-    go.disabled = !autos; markBtn.disabled = keepBtn.disabled = !n;
+    go.textContent = running ? 'Running…' : autos ? `Unsubscribe ${autos}` : 'Unsubscribe';
+    go.disabled = running || !autos; markBtn.disabled = keepBtn.disabled = !n;
     const a = autoOpen();
     all.checked = a.length > 0 && a.every(l => selected.has(l.key));
     all.indeterminate = !all.checked && a.some(l => selected.has(l.key));
@@ -665,6 +685,7 @@ function renderUnsubscribe(data) {
   });
   const settle = (l, status, label) => {
     const r = rows.get(l.key);
+    if (!r) return;
     l.settled = status !== 'active';
     selected.delete(l.key);
     r.row.classList.toggle('settled', l.settled);
@@ -677,6 +698,7 @@ function renderUnsubscribe(data) {
   const setOne = async (l, status, label) => {
     try {
       const res = await api('/api/subscriptions', {key: l.key, status, trash: trashBox.checked});
+      if (status === 'unsubscribed') l.trashed = res.moved;
       settle(l, status, status === 'unsubscribed' ? leftLabel(res.moved) : label); sync();
       toast(status === 'active' ? (res.moved ? `Back in suggestions; ${res.moved} emails restored` : 'Back in suggestions')
                                 : status === 'unsubscribed' ? leftLabel(res.moved) : label);
@@ -702,19 +724,11 @@ function renderUnsubscribe(data) {
                  (trashBox.checked ? `\nTheir emails (about ${emails}, none starred) go to Trash for those that accept.` : '') +
                  (skipped ? `\n${skipped} selected list${skipped === 1 ? " doesn't" : "s don't"} support it and will be left selected.` : '')))
       return;
-    go.disabled = true; go.textContent = `Unsubscribing ${keys.length}…`;
     try {
-      const {results, trash_error} = await api('/api/unsubscribe/one-click', {keys, trash: trashBox.checked});
-      let ok = 0, moved = 0;
-      for (const res of results) {
-        const l = lists.find(x => x.key === res.key), r = rows.get(res.key);
-        if (res.ok) { ok++; moved += res.trashed || 0; settle(l, 'unsubscribed', '✓ ' + leftLabel(res.trashed)); r.err.textContent = ''; }
-        else r.err.textContent = `Not unsubscribed: ${res.detail}`;
-      }
-      toast(`Unsubscribed from ${ok} of ${results.length}` + (moved ? `; ${moved} emails trashed` : '') +
-            (ok < results.length ? '; see the rows for why' : '') + (trash_error ? `. Mail not moved: ${trash_error}` : ''));
+      const job = await api('/api/unsubscribe/one-click', {keys, trash: trashBox.checked});
+      try { localStorage.removeItem('jobDismissed'); } catch (e) {}
+      followJob(job);
     } catch (e) { toast(e.message); }
-    sync();
   });
   const bar = el('div', {class: 'unsub-bar'},
     el('label', {class: 'actions', style: 'gap:6px'}, all, `Select all one-click (${autoOpen().length})`),
@@ -731,7 +745,9 @@ function renderUnsubscribe(data) {
           : l.mailto ? el('a', {class: 'cal', href: l.mailto, rel: 'noopener noreferrer'}, 'By email ↗') : null,
     el('button', {class: 'btn', onclick: () => setOne(l, 'unsubscribed', 'unsubscribed')}, 'Mark unsubscribed'),
     el('button', {class: 'btn', onclick: () => setOne(l, 'keep', 'kept')}, 'Keep')];
-  const items = lists.map(l => {
+  // Lists already left go last (still with Undo), the rest busiest first.
+  const ordered = [...lists].sort((a, b) => (a.unsubscribed ? 1 : 0) - (b.unsubscribed ? 1 : 0));
+  const items = ordered.map(l => {
     const box = el('input', {type: 'checkbox', 'aria-label': `Select ${l.sender_email}`});
     box.addEventListener('change', () => { box.checked ? selected.add(l.key) : selected.delete(l.key); sync(); });
     const actions = el('div', {class: 'actions', style: 'justify-content:flex-end'}, ...buttons(l));
@@ -743,7 +759,8 @@ function renderUnsubscribe(data) {
            l.auto ? el('span', {class: 'chip by-local'}, 'one-click') : null),
         el('div', {class: 'why'}, el('span', {class: 'rate'}, `~${l.per_week.toFixed(1)}/week`),
            `opened ${l.read} of ${l.received} · `, l.rule === 'rule:promo_unread' ? 'promotions you rarely open'
-             : l.rule === 'rule:noisy_updates' ? 'frequent notifications you rarely open' : 'you open these late, if at all'),
+             : l.rule === 'rule:noisy_updates' ? 'frequent notifications you rarely open'
+             : l.rule === 'rule:slow_reader' ? 'you open these late, if at all' : 'left by you'),
         l.last_id ? el('div', {class: 'last'}, 'Latest: ',
           gmailLink(l.last_id, l.last_subject || '(no subject)', false), el('span', {class: 'when'}, ` · ${received(l.last_received)}`)) : null,
         err),
@@ -753,8 +770,66 @@ function renderUnsubscribe(data) {
   });
   $('#unsub-list').replaceChildren(...(lists.length ? [bar, ...items]
     : [el('div', {class: 'empty'}, 'No suggestions: every list you get, you read.')]));
+  for (const l of lists) if (l.unsubscribed) settle(l, 'unsubscribed', leftLabel(l.trashed));
   sync();
+  UNSUB = {lists, rows, settle, leftLabel, sync, setRunning: (v) => { running = v; sync(); }};
 }
+
+// -- the background run: progress panel, kept across reloads ------------------------
+function followJob(job) {
+  clearTimeout(jobTimer);
+  showJob(job);
+  if (!job.finished) jobTimer = setTimeout(async () => {
+    try { followJob(await api('/api/jobs/latest')); } catch (e) { jobTimer = setTimeout(() => followJob(job), 3000); }
+  }, 1000);
+  else if (showJob.wasRunning) { showJob.wasRunning = false; loadReview().catch(() => {}); }
+}
+function showJob(job) {
+  const panel = $('#unsub-job');
+  let dismissed = null;
+  try { dismissed = localStorage.getItem('jobDismissed'); } catch (e) {}
+  if (!job || (job.finished && dismissed === job.started_at)) { panel.hidden = true; return; }
+  if (!job.finished) showJob.wasRunning = true;
+  const by = (state) => job.lists.filter(l => l.state === state);
+  const ok = by('unsubscribed'), failed = by('failed'), sending = by('sending'), queued = by('queued');
+  const done = ok.length + failed.length, total = job.lists.length;
+  const trashing = job.phase === 'trashing';
+  const pctDone = job.finished ? 100 : trashing
+    ? 90 + (job.trash_total ? 10 * job.trash_done / job.trash_total : 0) : 90 * done / Math.max(1, total);
+  panel.hidden = false;
+  panel.className = 'panel job' + (job.finished ? (failed.length || job.error ? ' problem' : ' done') : '');
+  panel.replaceChildren(
+    el('h3', {}, job.finished ? `Unsubscribed from ${ok.length} of ${total} lists`
+                              : trashing ? 'Moving their emails to Trash…' : `Unsubscribing… ${done} of ${total} lists`,
+       job.finished ? el('button', {class: 'undo', onclick: () => {
+         try { localStorage.setItem('jobDismissed', job.started_at); } catch (e) {}
+         panel.hidden = true; }}, 'Close') : null),
+    el('div', {class: 'prog', role: 'progressbar', 'aria-valuenow': Math.round(pctDone), 'aria-valuemin': 0, 'aria-valuemax': 100},
+       el('div', {style: `width:${pctDone}%`})),
+    el('div', {class: 'counts'},
+      el('span', {}, '✓ unsubscribed ', el('b', {}, ok.length)),
+      el('span', {}, '✗ failed ', el('b', {}, failed.length)),
+      job.finished ? null : el('span', {}, 'sending ', el('b', {}, sending.length)),
+      job.finished ? null : el('span', {}, 'waiting ', el('b', {}, queued.length)),
+      job.trash && (trashing || job.finished) && job.trash_total
+        ? el('span', {}, 'emails to Trash ', el('b', {}, `${job.trash_done} of ${job.trash_total}`)) : null),
+    job.error ? el('div', {class: 'err-line'}, job.error) : null,
+    failed.length ? el('ul', {}, failed.map(l => el('li', {}, l.key, ': ', el('span', {}, l.detail)))) : null);
+  // Keep the rows in step.
+  if (UNSUB) {
+    UNSUB.setRunning(!job.finished);
+    for (const l of job.lists) {
+      const item = UNSUB.lists.find(x => x.key === l.key), r = UNSUB.rows.get(l.key);
+      if (!item || !r) continue;
+      if (l.state === 'unsubscribed' && (!item.settled || job.finished)) {
+        item.trashed = l.trashed; UNSUB.settle(item, 'unsubscribed', '✓ ' + UNSUB.leftLabel(l.trashed)); r.err.textContent = '';
+      } else if (l.state === 'failed') r.err.textContent = `Not unsubscribed: ${l.detail}`;
+      else if (l.state === 'sending' && !item.settled) r.actions.replaceChildren(el('span', {class: 'chip sending'}, 'sending…'));
+    }
+    UNSUB.sync();
+  }
+}
+
 let recentView = 'all';
 $('#recent-filters').addEventListener('click', e => {
   const b = e.target.closest('button[data-view]'); if (!b) return;
