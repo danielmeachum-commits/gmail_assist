@@ -127,6 +127,7 @@ select.att { padding: 1px 4px; font-size: 12px; border-radius: 10px; }
 a.cal { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; text-decoration: none; white-space: nowrap;
   color: var(--accent); border: 1px solid var(--accent); border-radius: 6px; padding: 4px 8px; }
 a.cal:hover { background: var(--accent-soft); }
+a.cal.done { color: var(--good); border-color: var(--good); background: var(--good-soft); }
 .it.compact { grid-template-columns: 1fr auto; padding: 10px 14px; }
 button.btn.done { background: var(--good-soft); color: var(--good); border-color: var(--good); cursor: default; }
 select.saved { outline: 2px solid var(--good); outline-offset: 1px; }
@@ -607,9 +608,28 @@ function itemRow(it, kind, tz) {
       it.due && !it.start ? el('div', {class: 'due'}, it.due) : null,
       el('details', {class: 'src'}, el('summary', {}, n === 1 ? '1 email' : `${n} emails`),
          it.emails.map(e => gmailLink(e.id, `${e.sender_email || ''} — ${e.subject || '(no subject)'}`, e.unread)))),
-    el('div', {class: 'it-acts'},
-      it.start ? el('a', {class: 'cal', href: calendarUrl(it, tz), target: '_blank', rel: 'noopener noreferrer',
-                          title: 'Opens Google Calendar with the event filled in'}, '＋ Calendar') : null));
+    el('div', {class: 'it-acts'}, it.start ? calendarButton(it, tz) : null));
+}
+// Which items you've sent to Calendar, remembered in this browser. The page
+// can't see whether you saved the event there, only that you opened it.
+const CAL_KEY = 'calendarAdded';
+function calendarAdded() {
+  try { return new Set(JSON.parse(localStorage.getItem(CAL_KEY) || '[]')); } catch (e) { return new Set(); }
+}
+function calendarButton(it, tz) {
+  const key = `${it.message_ids.join(',')}@${it.start}`;
+  const link = el('a', {class: 'cal', href: calendarUrl(it, tz), target: '_blank', rel: 'noopener noreferrer',
+                        title: 'Opens Google Calendar with the event filled in'}, '＋ Calendar');
+  const mark = () => { link.classList.add('done'); link.textContent = '✓ In Calendar'; link.title = 'Opened in Google Calendar; tap to open again'; };
+  if (calendarAdded().has(key)) mark();
+  link.addEventListener('click', () => {
+    mark();
+    try {
+      const added = [...calendarAdded(), key].slice(-500);
+      localStorage.setItem(CAL_KEY, JSON.stringify([...new Set(added)]));
+    } catch (e) {}
+  });
+  return link;
 }
 function renderSummary(sm) {
   const box = $('#summary');
