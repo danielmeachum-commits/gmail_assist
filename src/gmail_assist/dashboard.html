@@ -128,6 +128,11 @@ a.cal { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; fo
   color: var(--accent); border: 1px solid var(--accent); border-radius: 6px; padding: 4px 8px; }
 a.cal:hover { background: var(--accent-soft); }
 a.cal.done { color: var(--good); border-color: var(--good); background: var(--good-soft); }
+button.cal { font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; color: var(--accent);
+  background: var(--panel); border: 1px solid var(--accent); border-radius: 6px; padding: 4px 8px; }
+button.cal:hover { background: var(--accent-soft); }
+button.undo { font: inherit; font-size: 11px; color: var(--muted); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
+.cal-when { font-weight: 600; color: var(--bad); margin: 4px 0; }
 .it.compact { grid-template-columns: 1fr auto; padding: 10px 14px; }
 button.btn.done { background: var(--good-soft); color: var(--good); border-color: var(--good); cursor: default; }
 select.saved { outline: 2px solid var(--good); outline-offset: 1px; }
@@ -239,6 +244,17 @@ dialog select, dialog input[type=text] { width: 100%; }
   </section>
 </main>
 <div id="toast"></div>
+<dialog id="cal-dialog">
+  <h3 id="cal-title"></h3>
+  <div class="cal-when" id="cal-when"></div>
+  <div class="reason" id="cal-note"></div>
+  <p class="note" id="cal-error" hidden></p>
+  <div class="actions" style="justify-content:flex-end; margin-top:14px">
+    <a class="btn" id="cal-open" target="_blank" rel="noopener noreferrer" style="text-decoration:none">Open in Calendar instead</a>
+    <button class="btn" id="cal-cancel">Cancel</button>
+    <button class="btn primary" id="cal-add">Add to Calendar</button>
+  </div>
+</dialog>
 <dialog id="new-label">
   <form method="dialog" id="new-label-form">
     <h3>New label</h3>
@@ -598,7 +614,7 @@ function isSoon(it) {
   const n = new Date(); const today = Date.UTC(n.getFullYear(), n.getMonth(), n.getDate());
   return then - today <= 2 * 86400000;   // within two days, or already past
 }
-function itemRow(it, kind, tz) {
+function itemRow(it, kind, ref) {
   const n = it.emails.length;
   return el('div', {class: `it ${kind}` + (kind === 'act' && isSoon(it) ? ' soon' : '')},
     dateBox(it),
@@ -608,28 +624,63 @@ function itemRow(it, kind, tz) {
       it.due && !it.start ? el('div', {class: 'due'}, it.due) : null,
       el('details', {class: 'src'}, el('summary', {}, n === 1 ? '1 email' : `${n} emails`),
          it.emails.map(e => gmailLink(e.id, `${e.sender_email || ''} — ${e.subject || '(no subject)'}`, e.unread)))),
-    el('div', {class: 'it-acts'}, it.start ? calendarButton(it, tz) : null));
+    el('div', {class: 'it-acts'}, it.start ? calendarControl(it, ref) : null));
 }
-// Which items you've sent to Calendar, remembered in this browser. The page
-// can't see whether you saved the event there, only that you opened it.
-const CAL_KEY = 'calendarAdded';
-function calendarAdded() {
-  try { return new Set(JSON.parse(localStorage.getItem(CAL_KEY) || '[]')); } catch (e) { return new Set(); }
+const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+function describe(p) {
+  const day = `${DAYS[new Date(Date.UTC(p.y, p.mo - 1, p.d)).getUTCDay()]}, ${MONTHS[p.mo - 1]} ${p.d}`;
+  return p.timed ? `${day} · ${(p.h % 12) || 12}:${pad(p.mi)} ${p.h < 12 ? 'AM' : 'PM'}` : day;
 }
-function calendarButton(it, tz) {
-  const key = `${it.message_ids.join(',')}@${it.start}`;
-  const link = el('a', {class: 'cal', href: calendarUrl(it, tz), target: '_blank', rel: 'noopener noreferrer',
-                        title: 'Opens Google Calendar with the event filled in'}, '＋ Calendar');
-  const mark = () => { link.classList.add('done'); link.textContent = '✓ In Calendar'; link.title = 'Opened in Google Calendar; tap to open again'; };
-  if (calendarAdded().has(key)) mark();
-  link.addEventListener('click', () => {
-    mark();
+function whenText(it) {
+  const a = parts(it.start);
+  if (!it.end) return a.timed ? `${describe(a)} (1 hour)` : `${describe(a)} · all day`;
+  const b = parts(it.end);
+  return a.timed ? `${describe(a)} – ${describe(b)}` : `${describe(a)} – ${describe(b)} · all day`;
+}
+// The add button for a summary item: a preview first, then the server adds it
+// with the Calendar API. Once added: "✓ Added" (opens the event) and Undo.
+function calendarControl(it, ref) {
+  const box = el('div', {class: 'actions', style: 'justify-content:flex-end'});
+  const render = () => {
+    if (it.calendar) {
+      box.replaceChildren(
+        el('a', {class: 'cal done', href: it.calendar.link || '#', target: '_blank', rel: 'noopener noreferrer',
+                 title: 'Open the event in Google Calendar'}, '✓ Added'),
+        el('button', {class: 'undo', onclick: async (ev) => {
+          ev.target.disabled = true;
+          try { await api('/api/calendar/undo', {key: it.calendar.key}); delete it.calendar; toast('Removed from Calendar'); render(); }
+          catch (e) { ev.target.disabled = false; toast(e.message); }
+        }}, 'Undo'));
+    } else {
+      box.replaceChildren(el('button', {class: 'cal', onclick: () => previewCalendar(it, ref, render)}, '＋ Calendar'));
+    }
+  };
+  render();
+  return box;
+}
+function previewCalendar(it, ref, done) {
+  const dialog = $('#cal-dialog');
+  $('#cal-title').textContent = it.title;
+  $('#cal-when').textContent = whenText(it);
+  $('#cal-note').textContent = it.note || '';
+  $('#cal-error').hidden = true;
+  $('#cal-open').href = calendarUrl(it, ref.tz);
+  const add = $('#cal-add');
+  add.disabled = false; add.textContent = 'Add to Calendar';
+  add.onclick = async () => {
+    add.disabled = true; add.textContent = 'Adding…';
     try {
-      const added = [...calendarAdded(), key].slice(-500);
-      localStorage.setItem(CAL_KEY, JSON.stringify([...new Set(added)]));
-    } catch (e) {}
-  });
-  return link;
+      it.calendar = await api('/api/calendar', {summary_id: ref.id, section: ref.section, index: ref.index});
+      dialog.close(); toast('Added to Google Calendar'); done();
+    } catch (e) {
+      // Not signed in, or Google refused: say why, and leave the link as a way out.
+      $('#cal-error').textContent = e.message; $('#cal-error').hidden = false;
+      add.disabled = false; add.textContent = 'Try again';
+    }
+  };
+  $('#cal-cancel').onclick = () => dialog.close();
+  $('#cal-open').onclick = () => dialog.close();
+  dialog.showModal();
 }
 function renderSummary(sm) {
   const box = $('#summary');
@@ -640,7 +691,7 @@ function renderSummary(sm) {
   const label = {morning: 'Morning briefing', evening: 'Evening recap', manual: 'Summary'}[sm.kind] || sm.kind;
   const section = (id, kind, title, hint, list) => el('div', {class: 'sec', id},
     el('div', {class: `sec-h ${kind}`}, title, el('span', {class: 'hint'}, hint)),
-    el('div', {class: 'panel list'}, list.length ? list.map(it => itemRow(it, kind, sm.tz))
+    el('div', {class: 'panel list'}, list.length ? list.map((it, index) => itemRow(it, kind, {id: sm.id, section: kind, index, tz: sm.tz}))
                                                  : el('div', {class: 'empty'}, 'Nothing here.')));
   box.replaceChildren(
     el('div', {class: 'panel hero'},

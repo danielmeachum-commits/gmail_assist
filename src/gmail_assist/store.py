@@ -21,6 +21,8 @@ Tables:
   - settings:      small key/value switches set from the dashboard.
   - summaries:     the morning briefings and evening recaps shown in the
                    dashboard.
+  - calendar_events: events added to Google Calendar from a summary item, so
+                   it isn't added twice and can be undone.
 """
 import os
 from collections.abc import Iterable
@@ -203,6 +205,18 @@ class Summary(Base):
     period_end: Mapped[datetime]
     content: Mapped[dict[str, Any]]           # see agent/summary.py
     model: Mapped[str | None]
+    created_at: Mapped[datetime] = mapped_column(default=_now)
+
+
+class CalendarEvent(Base):
+    __tablename__ = 'calendar_events'
+
+    account: Mapped[str] = mapped_column(primary_key=True)
+    # The summary item: its message ids and start, "id1,id2@2026-10-22T19:00".
+    key: Mapped[str] = mapped_column(primary_key=True)
+    event_id: Mapped[str]
+    html_link: Mapped[str | None] = mapped_column(Text)
+    title: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(default=_now)
 
 
@@ -956,6 +970,23 @@ class Store:
         with self.ReadSession() as s:
             return s.scalar(select(Summary).where(Summary.account == account, Summary.kind == kind)
                             .order_by(Summary.period_end.desc()).limit(1))
+
+    def calendar_events(self, account: str) -> dict[str, CalendarEvent]:
+        with self.ReadSession() as s:
+            return {e.key: e for e in s.scalars(select(CalendarEvent).where(CalendarEvent.account == account))}
+
+    def add_calendar_event(self, account: str, key: str, event_id: str, html_link: str | None,
+                           title: str | None) -> None:
+        with self.Session.begin() as s:
+            s.merge(CalendarEvent(account=account, key=key, event_id=event_id, html_link=html_link,
+                                  title=title, created_at=_now()))
+
+    def remove_calendar_event(self, account: str, key: str) -> CalendarEvent | None:
+        with self.Session.begin() as s:
+            event = s.get(CalendarEvent, (account, key))
+            if event:
+                s.delete(event)
+            return event
 
     # -- settings ------------------------------------------------------------
 

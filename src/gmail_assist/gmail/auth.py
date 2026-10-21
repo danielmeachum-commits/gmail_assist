@@ -1,9 +1,12 @@
-"""Gmail OAuth credentials, stored as 0600 files in ~/.config/gmail_assist/.
+"""Google OAuth credentials, stored as 0600 files in ~/.config/gmail_assist/.
 
-Two grants are kept separately so most work runs with a read-only token:
-  - 'read':   gmail.readonly
-  - 'modify': gmail.modify (apply labels, archive, trash -- and send mail)
-Only ask for 'modify' at the point a write is actually needed.
+Grants are kept separately so most work runs with a read-only token:
+  - 'read':     gmail.readonly
+  - 'modify':   gmail.modify (apply labels, archive, trash -- and send mail)
+  - 'calendar': calendar.events.owned (add events to calendars you own; it
+                can't change sharing or calendar settings)
+Only ask for a write grant at the point a write is actually needed. Sign in
+to any of them with `gmail-assist login <grant>`.
 
 Signing in needs a browser, so it only happens from a terminal. Anywhere
 else (systemd, cron) a missing or revoked token raises AuthRequired instead
@@ -21,11 +24,12 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-Access = Literal['read', 'modify']
+Access = Literal['read', 'modify', 'calendar']
 
 SCOPES: dict[Access, list[str]] = {
     'read': ['https://www.googleapis.com/auth/gmail.readonly'],
     'modify': ['https://www.googleapis.com/auth/gmail.modify'],
+    'calendar': ['https://www.googleapis.com/auth/calendar.events.owned'],
 }
 
 OAUTH_PORT = 38991
@@ -36,9 +40,10 @@ class AuthRequired(RuntimeError):
 
     def __init__(self, access: 'Access'):
         super().__init__(
-            f"Gmail '{access}' access needs signing in again (token missing, expired or "
-            f"revoked). Run `uv run gmail-assist labels` from a terminal to sign in."
+            f"Google '{access}' access needs signing in (token missing, expired or "
+            f"revoked). Run `uv run gmail-assist login {access}` from a terminal."
         )
+        self.access = access
 
 
 def _config_dir() -> Path:

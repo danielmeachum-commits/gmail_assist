@@ -16,8 +16,9 @@ Requests must name this machine in their Host header (so a web page can't
 reach it by rebinding a DNS name to 127.0.0.1), and changes must be JSON
 with an X-Gmail-Assist header (which a cross-site form can't send).
 
-It reads and writes only the local store, and never calls Gmail. The one
-outside call is "write a summary now", which asks Claude like the schedule does.
+It reads and writes only the local store, and never calls Gmail. The
+outside calls are "write a summary now" (Claude, like the schedule) and
+adding a summary item to Google Calendar (see gcal.py).
 """
 import json
 import logging
@@ -31,9 +32,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from gmail_assist import gcal
 from gmail_assist.agent import nodes, summary
 from gmail_assist.agent.labels import DEFINITIONS, automated, parent
 from gmail_assist.agent.run import PROPOSAL_MIN_MESSAGES, PROPOSAL_MIN_SENDERS
+from gmail_assist.gmail.auth import AuthRequired
 from gmail_assist.store import Decision, Message, Store, Summary
 
 log = logging.getLogger(__name__)
@@ -158,7 +161,57 @@ class Api:
         return out
 
     def summaries(self) -> list[dict[str, Any]]:
-        return [_summary_row(s) for s in self.store.summaries(self.account)]
+        """Recent summaries; items already added to Calendar carry 'calendar'."""
+        added = self.store.calendar_events(self.account)
+        rows = [_summary_row(s) for s in self.store.summaries(self.account)]
+        for row in rows:
+            for item in row['act'] + row['read']:
+                if item.get('start') and (event := added.get(gcal.item_key(item))):
+                    item['calendar'] = {'key': event.key, 'link': event.html_link}
+        return rows
+
+    def add_to_calendar(self, body: dict) -> dict[str, Any]:
+        """Add one summary item, found by summary id, section and position
+        (the event is built from the stored summary, not from the request)."""
+        with self.store.ReadSession() as s:
+            sm = s.get(Summary, body.get('summary_id'))
+        if sm is None or sm.account != self.account or body.get('section') not in ('act', 'read'):
+            raise ValueError('unknown summary item')
+        try:
+            item = sm.content[body['section']][int(body.get('index'))]
+        except (IndexError, TypeError, ValueError):
+            raise ValueError('unknown summary item') from None
+        if not item.get('start'):
+            raise ValueError('that item has no date')
+        key = gcal.item_key(item)
+        if existing := self.store.calendar_events(self.account).get(key):
+            return {'key': key, 'link': existing.html_link}
+        event = self._calendar(lambda: gcal.add_event(item, local_zone()))
+        self.store.add_calendar_event(self.account, key, event['id'], event.get('htmlLink'), item['title'])
+        return {'key': key, 'link': event.get('htmlLink')}
+
+    def remove_from_calendar(self, body: dict) -> dict[str, Any]:
+        event = self.store.calendar_events(self.account).get(body.get('key') or '')
+        if event is None:
+            raise ValueError('not in Calendar')
+        self._calendar(lambda: gcal.delete_event(event.event_id))
+        self.store.remove_calendar_event(self.account, event.key)
+        return {'ok': True}
+
+    @staticmethod
+    def _calendar(call):
+        """Run a Calendar call, turning its failures into messages for the page."""
+        from googleapiclient.errors import HttpError
+
+        try:
+            return call()
+        except AuthRequired:
+            raise ValueError('Calendar needs signing in: run `uv run gmail-assist login calendar` '
+                             'in a terminal on the server') from None
+        except HttpError as err:
+            if err.resp.status in (404, 410):   # already gone (undo of a deleted event)
+                return None
+            raise ValueError(f'Google Calendar said: {err.reason}') from None
 
     def needs_you(self) -> list[dict[str, Any]]:
         """'act' mail from the last few days, newest first."""
@@ -322,6 +375,10 @@ def make_handler(api: Api, allowed_hosts: set[str]) -> type[BaseHTTPRequestHandl
                 self._run(lambda: api.attention(body))
             elif path == '/api/summaries':
                 self._run(api.write_summary)
+            elif path == '/api/calendar':
+                self._run(lambda: api.add_to_calendar(body))
+            elif path == '/api/calendar/undo':
+                self._run(lambda: api.remove_from_calendar(body))
             elif path == '/api/settings':
                 self._run(lambda: api.settings(body))
             else:

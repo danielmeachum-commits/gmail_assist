@@ -5,7 +5,7 @@ import sys
 
 from dotenv import load_dotenv
 
-from gmail_assist.gmail.auth import AuthRequired, get_service
+from gmail_assist.gmail.auth import AuthRequired, get_credentials, get_service
 
 # sysexits.h EX_CONFIG. The systemd unit won't restart on it: restarting
 # can't fix a missing sign-in.
@@ -27,6 +27,11 @@ def labels() -> None:
         print('Labels:')
         for label in labels:
             print(f"- {label['name']}")
+
+
+def login(args: argparse.Namespace) -> None:
+    get_credentials(args.access, interactive=True)
+    print(f'Signed in: {args.access} access is ready.')
 
 
 def sync(args: argparse.Namespace) -> None:
@@ -114,6 +119,9 @@ def main() -> None:
     parser.add_argument('-v', '--verbose', action='store_true')
     sub = parser.add_subparsers(dest='command')
     sub.add_parser('labels', help='list Gmail labels')
+    p = sub.add_parser('login', help='sign in to Google for one grant (opens a browser)')
+    p.add_argument('access', choices=['read', 'modify', 'calendar'],
+                   help='read: Gmail read-only; modify: change Gmail; calendar: add calendar events')
     p = sub.add_parser('sync', help='pull new mail into the local store')
     p.add_argument('--full', action='store_true', help='ignore the saved cursor and resync the window')
     p.add_argument('--query', default='newer_than:90d', help='Gmail search for full syncs')
@@ -165,7 +173,9 @@ def main() -> None:
 
 
 def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
-    if args.command == 'sync':
+    if args.command == 'login':
+        login(args)
+    elif args.command == 'sync':
         sync(args)
     elif args.command == 'serve':
         serve(args, parser)
