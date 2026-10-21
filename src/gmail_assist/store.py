@@ -512,6 +512,26 @@ class Store:
             s.add(decision)
         return decision
 
+    def thread_label(self, account: str, thread_id: str, exclude_id: str | None = None) -> Decision | None:
+        """The topic label already decided for another message in this
+        thread (the earliest, since thread labels are fixed), or None. Only
+        'label' decisions count: one sent to review gets classified afresh,
+        and the rule-added Me tag isn't a topic."""
+        from gmail_assist.agent.labels import ME_LABEL
+
+        q = (
+            select(Decision)
+            .join(Message, (Message.account == Decision.account) & (Message.id == Decision.message_id))
+            .where(Decision.account == account, Message.thread_id == thread_id,
+                   Decision.action == 'label', Decision.label != ME_LABEL)
+            .order_by(Decision.created_at)
+            .limit(1)
+        )
+        if exclude_id:
+            q = q.where(Decision.message_id != exclude_id)
+        with self.ReadSession() as s:
+            return s.scalar(q)
+
     def decisions_for(self, account: str, message_id: str) -> list[Decision]:
         with self.ReadSession() as s:
             return list(s.scalars(

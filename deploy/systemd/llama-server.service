@@ -1,13 +1,19 @@
 # Local model for gmail-assist's triage graph (LOCAL_MODEL in agent/nodes.py).
 # Port 8081 keeps it off 8080, where gmail-assist serve receives Gmail pushes.
-# -np 4 matches serve's default --workers 4; -c is split across the slots.
+# -np 4 matches serve's default --workers 4; -c is split across the slots,
+# 4096 tokens each, enough for the longest prompt (body capped at 4000 chars).
+# Memory is tight (7.5 GB shared with the GPU), so:
+#   --no-mmproj          skip the image encoder (~850 MB): triage reads text only
+#   --cache-ram 0        no RAM cache of past prompts (default up to 8 GB); emails
+#   --ctx-checkpoints 1  don't repeat, so it only grew until the machine swapped
 [Unit]
 Description=llama.cpp server (gemma-3-4b-it) for gmail-assist
 
 [Service]
 ExecStart=/ssd/repos/llama.cpp/build/bin/llama-server \
     -hf ggml-org/gemma-3-4b-it-qat-GGUF \
-    --host 127.0.0.1 --port 8081 -c 8192 -np 4 -fa on
+    --host 127.0.0.1 --port 8081 -c 16384 -np 4 -fa on \
+    --no-mmproj --cache-ram 0 --ctx-checkpoints 1
 Restart=on-failure
 RestartSec=10
 

@@ -9,6 +9,7 @@ nodes.choose_model); .env only says how to reach each provider:
 
 Specs look like "local:qwen3:8b" or "anthropic:claude-opus-5-5".
 """
+import math
 import os
 import threading
 from dataclasses import dataclass, field
@@ -41,6 +42,15 @@ class LLM:
     def name(self) -> str:
         """Recorded on each decision, so you can compare models later."""
         return f'{self.provider}:{self.model}'
+
+    def choose(self, messages: list) -> tuple[str, dict[str, float]]:
+        """A one-token answer (e.g. a letter) plus the probability of each of
+        the top candidate tokens. Local OpenAI-compatible servers only."""
+        response = self.chat.bind(max_tokens=1, logprobs=True, top_logprobs=5).invoke(messages)
+        content = (response.response_metadata.get('logprobs') or {}).get('content') or [{}]
+        probs = {t['token'].strip(): math.exp(t['logprob'])
+                 for t in content[0].get('top_logprobs', [])}
+        return response.content.strip(), probs
 
     def structured(self, schema: type[BaseModel]) -> Runnable:
         """The chat model constrained to return `schema`.

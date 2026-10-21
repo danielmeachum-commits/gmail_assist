@@ -58,6 +58,22 @@ def process(args: argparse.Namespace) -> None:
         print(f'Processed: {counts}. Queue: {store.counts()}')
 
 
+def eval_cmd(args: argparse.Namespace) -> None:
+    from gmail_assist.agent import evaluate
+
+    service = get_service('read')
+    if args.step == 'fetch':
+        counts = evaluate.fetch(service, per_label=args.per_label)
+        print(f'Stored {sum(counts.values())} reference emails in {evaluate.eval_dir()}')
+    elif args.step == 'score':
+        summary = evaluate.score(service, workers=args.workers)
+        for key, value in summary.items():
+            print(f'{key:22s} {value:.1%}' if isinstance(value, float) else f'{key:22s} {value}')
+    elif args.step == 'reference':
+        path = evaluate.reference(service, workers=args.workers, relabel=args.relabel)
+        print(f'Reference labels: {path}')
+
+
 def setup_logging(verbose: bool) -> None:
     console_level = logging.INFO if verbose else logging.WARNING
     logging.basicConfig(level=console_level,
@@ -112,6 +128,15 @@ def main() -> None:
     p.add_argument('--workers', type=int, default=4,
                    help='messages processed in parallel (default 4); match llama-server -np')
     p.add_argument('--db', help='store path (default: ~/.local/share/gmail_assist/store.db)')
+    p = sub.add_parser('eval', help='build and score the triage reference set')
+    p.add_argument('step', choices=['fetch', 'reference', 'score'],
+                   help='fetch: copy labelled emails into the eval store; '
+                        'reference: label them with Claude Opus; '
+                        'score: measure the local model against the reference')
+    p.add_argument('--per-label', type=int, default=25)
+    p.add_argument('--relabel', action='append', metavar='LABEL',
+                   help='reference: redo emails currently referenced as LABEL (repeatable)')
+    p.add_argument('--workers', type=int, default=4)
     args = parser.parse_args()
 
     setup_logging(args.verbose)
@@ -129,5 +154,7 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> No
         serve(args, parser)
     elif args.command == 'process':
         process(args)
+    elif args.command == 'eval':
+        eval_cmd(args)
     else:
         labels()

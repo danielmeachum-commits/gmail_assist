@@ -42,9 +42,11 @@ class EmailState(TypedDict, total=False):
     body: str | None           # None for bulk mail (headers only)
     label_ids: list[str]
     subscription_key: str | None
+    thread_id: str
 
     # -- working values set by nodes ---------------------------------------
     is_login_code: bool
+    inherited: bool             # took an earlier message's thread label
     subscription_stats: dict[str, Any] | None
     # The model classify uses next, as "<provider>:<model>"; set by
     # choose_model and changed by escalate. None means no model available.
@@ -82,6 +84,7 @@ def initial_state(msg: Message) -> EmailState:
         'body': msg.body_text(),
         'label_ids': msg.label_ids,
         'subscription_key': msg.subscription_key,
+        'thread_id': msg.thread_id,
         'attempts': [],
         'decisions': [],
         'subscription_flag': None,
