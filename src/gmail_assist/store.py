@@ -412,6 +412,11 @@ class Store:
         with self.Session.begin() as s:
             s.execute(stmt)
 
+    def account(self) -> str | None:
+        """The account this store syncs (the first, if there were several)."""
+        with self.ReadSession() as s:
+            return s.scalar(select(SyncState.account).order_by(SyncState.account).limit(1))
+
     def triage_since(self, account: str) -> datetime:
         """The account's triage cutoff, set to now the first time it's asked for."""
         stmt = insert(SyncState).values(account=account, triage_since=_now())

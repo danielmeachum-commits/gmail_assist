@@ -16,7 +16,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
@@ -116,6 +116,65 @@ def get_credentials(access: Access = 'read', interactive: bool | None = None) ->
         _save_token(access, creds)
 
     return creds
+
+
+# -- signing in from the dashboard ---------------------------------------------
+#
+# A Desktop-app client can only send the browser back to 127.0.0.1 on the
+# device signing in, which the server never sees from a phone. The dashboard
+# uses a second, Web-application client instead, whose redirect URI is the
+# dashboard's own address (tailnet only: Google just redirects the browser
+# there, it never connects to it).
+
+def web_client_path() -> Path:
+    return Path(os.environ.get('GMAIL_ASSIST_WEB_CLIENT') or _config_dir() / 'web_client.json')
+
+
+def web_redirect_uri() -> str | None:
+    """The client's redirect URI ending in /oauth/callback, if it's set up."""
+    try:
+        config = json.loads(web_client_path().read_text())['web']
+    except (OSError, ValueError, KeyError):
+        return None
+    return next((u for u in config.get('redirect_uris', []) if u.endswith('/oauth/callback')), None)
+
+
+def start_web_signin(access: Access) -> tuple[str, str, Any]:
+    """Begin a sign-in. Returns (Google URL to send the browser to, state,
+    flow); keep the flow under its state for finish_web_signin()."""
+    from google_auth_oauthlib.flow import Flow
+
+    redirect_uri = web_redirect_uri()
+    if not redirect_uri:
+        raise FileNotFoundError(f'no web OAuth client with an /oauth/callback redirect at {web_client_path()}')
+    flow = Flow.from_client_secrets_file(str(web_client_path()), SCOPES[access], redirect_uri=redirect_uri)
+    # offline + consent: always return a refresh token, even on a re-grant.
+    url, state = flow.authorization_url(access_type='offline', prompt='consent')
+    return url, state, flow
+
+
+def finish_web_signin(access: Access, flow, query: str) -> None:
+    """Trade the callback's code for a token and save it. `query` is the
+    callback's query string; the URL is rebuilt from the registered redirect
+    URI, since behind tailscale serve the request itself arrives over http."""
+    # We check the granted scopes ourselves, below; oauthlib would otherwise
+    # raise if Google lists them differently from how we asked.
+    os.environ.setdefault('OAUTHLIB_RELAX_TOKEN_SCOPE', '1')
+    flow.fetch_token(authorization_response=f'{flow.redirect_uri}?{query}')
+    creds = flow.credentials
+    if not creds.has_scopes(SCOPES[access]):
+        raise PermissionError(f'Google did not grant {access} access (was a box left unticked?)')
+    _save_token(access, creds)
+
+
+def status(access: Access) -> bool:
+    """Whether `access` has a working token (refreshing it if it's expired,
+    which is the only way to notice one that was revoked)."""
+    try:
+        get_credentials(access, interactive=False)
+        return True
+    except AuthRequired:
+        return False
 
 
 def get_service(access: Access = 'read'):

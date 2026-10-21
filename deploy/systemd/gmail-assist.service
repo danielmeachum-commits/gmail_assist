@@ -15,8 +15,10 @@ Restart=on-failure
 RestartSec=10
 # Python exits 143 on systemd's SIGTERM; that's a clean stop, not a failure.
 SuccessExitStatus=143
-# 78 = Gmail sign-in needed (token missing or revoked). Restarting can't fix
-# that, so stop and show the unit as failed; the journal says what to run.
+# 78 = Gmail sign-in needed and no way to do it here: the dashboard is off,
+# or this store was never signed in. Restarting can't fix that, so stop and
+# show the unit as failed; the journal says what to run. (With the dashboard
+# on, serve stays up with sync paused and you sign in there.)
 RestartPreventExitStatus=78
 
 [Install]

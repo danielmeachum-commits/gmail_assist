@@ -48,9 +48,34 @@ def serve(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
 
     if not args.topic or not args.audience:
         parser.error('serve needs --topic and --audience (or GMAIL_ASSIST_TOPIC / GMAIL_ASSIST_PUSH_AUDIENCE)')
-    serve(get_service('read'), args.topic, args.audience, args.service_account,
+    try:
+        service = get_service('read')
+    except AuthRequired:
+        if not args.dashboard_port:
+            raise
+        service = _signin_from_dashboard(args)
+    serve(service, args.topic, args.audience, args.service_account,
           host=args.host, port=args.port, path=args.path, db=args.db,
           triage=not args.no_triage, workers=args.workers, dashboard_port=args.dashboard_port)
+
+
+def _signin_from_dashboard(args: argparse.Namespace):
+    """Gmail sign-in is missing at startup: run just the dashboard until
+    you sign in there, then hand back a Gmail client so serve can start."""
+    from gmail_assist import dashboard
+    from gmail_assist.store import Store
+    from gmail_assist.watch import wait_for_gmail
+
+    with Store(args.db) as store:
+        account = store.account()
+    if account is None:
+        raise AuthRequired('read')   # never signed in: the first time needs a terminal
+    server = dashboard.start(account, args.db, port=args.dashboard_port)
+    try:
+        return wait_for_gmail()
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def dashboard_cmd(args: argparse.Namespace) -> None:

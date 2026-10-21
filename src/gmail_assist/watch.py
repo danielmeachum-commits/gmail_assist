@@ -17,6 +17,11 @@ queue, up to MAX_ATTEMPTS each, so a model server that was down catches up.
 
 Every request must carry the OIDC token Pub/Sub adds when the subscription
 has push auth enabled (--push-auth-service-account); anything else gets a 403.
+
+If Gmail sign-in is lost (token revoked or expired) and the dashboard is
+on, serve keeps running with sync paused until you sign in again from the
+dashboard. Without the dashboard there's no way to sign in without a
+terminal, so it stops (exit 78, see the systemd unit).
 """
 import base64
 import json
@@ -31,6 +36,9 @@ from google.auth.exceptions import GoogleAuthError, RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2 import id_token
 
+from googleapiclient.discovery import build
+
+from gmail_assist.gmail import auth
 from gmail_assist.gmail.auth import AuthRequired
 from gmail_assist.store import Store
 from gmail_assist.sync import incremental_sync
@@ -48,6 +56,8 @@ MAX_BODY = 64 * 1024
 # left as failed for good.
 TRIAGE_BATCH = 20
 MAX_ATTEMPTS = 3
+# While waiting for you to sign in again, how often to check.
+SIGNIN_POLL_S = 15
 
 
 def start_watch(service, topic: str) -> dict:
@@ -89,8 +99,12 @@ class SyncWorker(threading.Thread):
     and serializing syncs means the history cursor only moves forward."""
 
     def __init__(self, service, account: str, topic: str, db: Path | str | None = None,
-                 triage: bool = True, workers: int = 4, on_fatal=None):
+                 triage: bool = True, workers: int = 4, on_fatal=None,
+                 wait_for_signin: bool = False):
         super().__init__(name='sync', daemon=True)
+        # On a lost sign-in, pause until you sign in again (from the
+        # dashboard) instead of stopping.
+        self.wait_for_signin = wait_for_signin
         # Called (from this thread) when the worker can't carry on, e.g.
         # Google rejected the refresh token; serve() uses it to shut down.
         self.on_fatal = on_fatal
@@ -107,15 +121,23 @@ class SyncWorker(threading.Thread):
         self._wake.set()
 
     def run(self) -> None:
-        try:
-            self._loop()
-        except RefreshError as err:
-            # Retrying can't fix a revoked or expired refresh token.
-            log.error('Google rejected the refresh token: %s', err)
-            self.fatal = AuthRequired('read')
-        except Exception as err:
-            log.exception('sync worker crashed')
-            self.fatal = err
+        while True:
+            try:
+                self._loop()
+            except RefreshError as err:
+                # Retrying can't fix a revoked or expired refresh token.
+                log.error('Google rejected the refresh token: %s', err)
+                if not self.wait_for_signin:
+                    self.fatal = AuthRequired('read')
+                    break
+                # It's useless now; removing it lets the dashboard show sign-in as needed.
+                auth.clear_credentials('read')
+                self.service = wait_for_gmail(self._wake)
+                continue
+            except Exception as err:
+                log.exception('sync worker crashed')
+                self.fatal = err
+            break
         if self.on_fatal:
             self.on_fatal()
 
@@ -168,6 +190,20 @@ class SyncWorker(threading.Thread):
             log.info('triaged: %s', counts)
             if not sum(counts.values()):
                 return  # nothing claimable after all; don't spin
+
+
+def wait_for_gmail(wake: threading.Event | None = None):
+    """Block until Gmail read access works again (you sign in from the
+    dashboard), then return a fresh Gmail client."""
+    log.error('Gmail sign-in needed: sync is paused. Sign in from the dashboard '
+              '(or run `uv run gmail-assist login read` in a terminal).')
+    wake = wake or threading.Event()
+    while not auth.status('read'):
+        wake.wait(SIGNIN_POLL_S)
+        wake.clear()
+    log.info('Gmail sign-in is back: resuming')
+    return build('gmail', 'v1', credentials=auth.get_credentials('read', interactive=False),
+                 cache_discovery=False)
 
 
 def make_handler(path: str, verifier: PushVerifier, on_notify) -> type[BaseHTTPRequestHandler]:
@@ -231,7 +267,8 @@ def serve(service, topic: str, audience: str, service_account: str | None = None
             log.warning('no ANTHROPIC_API_KEY: daily summaries are off')
     server = None
     worker = SyncWorker(service, account, topic, db, triage=triage, workers=workers,
-                        on_fatal=lambda: server and server.shutdown())
+                        on_fatal=lambda: server and server.shutdown(),
+                        wait_for_signin=bool(dashboard_port))
     server = ThreadingHTTPServer(
         (host, port), make_handler(path, PushVerifier(audience, service_account), worker.notify)
     )

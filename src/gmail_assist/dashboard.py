@@ -19,23 +19,31 @@ with an X-Gmail-Assist header (which a cross-site form can't send).
 It reads and writes only the local store, and never calls Gmail. The
 outside calls are "write a summary now" (Claude, like the schedule) and
 adding a summary item to Google Calendar (see gcal.py).
+
+Signing in to Google also happens here (see auth.py, "signing in from the
+dashboard"): /api/auth/start hands the browser a Google URL, and Google
+sends it back to /oauth/callback with a code. The state value that ties the
+two together is single-use, expires after SIGNIN_TTL_S, and can only be
+created by a request that passed the header check.
 """
 import json
 import logging
 import subprocess
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from gmail_assist import gcal
 from gmail_assist.agent import nodes, summary
 from gmail_assist.agent.labels import DEFINITIONS, automated, parent
 from gmail_assist.agent.run import PROPOSAL_MIN_MESSAGES, PROPOSAL_MIN_SENDERS
+from gmail_assist.gmail import auth
 from gmail_assist.gmail.auth import AuthRequired
 from gmail_assist.store import Decision, Message, Store, Summary
 
@@ -44,6 +52,38 @@ log = logging.getLogger(__name__)
 PORT = 8090
 MAX_BODY = 64 * 1024
 CSRF_HEADER = 'X-Gmail-Assist'
+GRANTS = ('read', 'modify', 'calendar')
+SIGNIN_TTL_S = 600
+
+
+class SignIns:
+    """Sign-ins started but not finished, by OAuth state."""
+
+    def __init__(self):
+        self._pending: dict[str, tuple[str, Any, float]] = {}
+        self._lock = threading.Lock()
+
+    def start(self, access: str) -> str:
+        url, state, flow = auth.start_web_signin(access)
+        with self._lock:
+            now = time.monotonic()
+            self._pending = {k: v for k, v in self._pending.items() if v[2] > now}
+            self._pending[state] = (access, flow, now + SIGNIN_TTL_S)
+        return url
+
+    def finish(self, query: str) -> str:
+        """Complete the sign-in a callback's query belongs to; returns its grant."""
+        params = {k: v[-1] for k, v in parse_qs(query).items()}
+        with self._lock:
+            pending = self._pending.pop(params.get('state', ''), None)
+        if pending is None or pending[2] < time.monotonic():
+            raise ValueError('that sign-in expired or was already used; start again')
+        access, flow, _ = pending
+        if 'error' in params:
+            raise ValueError(f"Google said: {params['error']}")
+        auth.finish_web_signin(access, flow, query)
+        log.info('signed in to %s access from the dashboard', access)
+        return access
 
 
 def tailnet_name() -> str | None:
@@ -110,6 +150,19 @@ class Api:
     def __init__(self, store: Store, account: str):
         self.store = store
         self.account = account
+        self.signins = SignIns()
+
+    def auth_status(self) -> dict[str, Any]:
+        return {'grants': {g: auth.status(g) for g in GRANTS},
+                'web_client': auth.web_redirect_uri() is not None}
+
+    def start_signin(self, body: dict) -> dict[str, Any]:
+        if body.get('access') not in GRANTS:
+            raise ValueError(f'access must be one of {", ".join(GRANTS)}')
+        try:
+            return {'url': self.signins.start(body['access'])}
+        except FileNotFoundError as err:
+            raise ValueError(str(err)) from None
 
     def definitions(self) -> dict[str, str]:
         return {d.name: d.description for d in self.store.definitions(self.account)}
@@ -331,6 +384,8 @@ def make_handler(api: Api, allowed_hosts: set[str]) -> type[BaseHTTPRequestHandl
             query = {k: v[-1] for k, v in parse_qs(url.query).items()}
             if url.path == '/':
                 return self._send(HTTPStatus.OK, page, 'text/html; charset=utf-8')
+            if url.path == '/oauth/callback':
+                return self._signin_callback(url.query)
             routes = {
                 '/api/summary': api.summary,
                 '/api/decisions': lambda: api.decisions(query.get('view', 'all'),
@@ -340,6 +395,7 @@ def make_handler(api: Api, allowed_hosts: set[str]) -> type[BaseHTTPRequestHandl
                 '/api/senders': api.senders,
                 '/api/summaries': api.summaries,
                 '/api/needs-you': api.needs_you,
+                '/api/auth': api.auth_status,
             }
             if url.path not in routes:
                 return self._send(HTTPStatus.NOT_FOUND, {'error': 'not found'})
@@ -375,6 +431,8 @@ def make_handler(api: Api, allowed_hosts: set[str]) -> type[BaseHTTPRequestHandl
                 self._run(lambda: api.attention(body))
             elif path == '/api/summaries':
                 self._run(api.write_summary)
+            elif path == '/api/auth/start':
+                self._run(lambda: api.start_signin(body))
             elif path == '/api/calendar':
                 self._run(lambda: api.add_to_calendar(body))
             elif path == '/api/calendar/undo':
@@ -383,6 +441,20 @@ def make_handler(api: Api, allowed_hosts: set[str]) -> type[BaseHTTPRequestHandl
                 self._run(lambda: api.settings(body))
             else:
                 self._send(HTTPStatus.NOT_FOUND, {'error': 'not found'})
+
+        def _signin_callback(self, query: str) -> None:
+            """Google sends the browser here after a sign-in; back to the page,
+            which reports the result from the fragment."""
+            try:
+                result = f'ok:{api.signins.finish(query)}'
+            except Exception as err:
+                log.warning('dashboard sign-in failed: %s: %s', type(err).__name__, err)
+                result = f'error:{err}'
+            self.send_response(HTTPStatus.SEE_OTHER)
+            self.send_header('Location', f'/#signin={quote(result)}')
+            self.send_header('Content-Length', '0')
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
 
         def _host_ok(self) -> bool:
             return (self.headers.get('Host') or '').lower() in allowed_hosts

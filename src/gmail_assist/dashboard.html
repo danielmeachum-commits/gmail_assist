@@ -132,6 +132,13 @@ button.cal { font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; 
   background: var(--panel); border: 1px solid var(--accent); border-radius: 6px; padding: 4px 8px; }
 button.cal:hover { background: var(--accent-soft); }
 button.undo { font: inherit; font-size: 11px; color: var(--muted); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
+.banner { max-width: 1200px; margin: 12px auto 0; padding: 0 16px; }
+.banner > div { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap;
+  background: var(--bad-soft); color: var(--bad); border: 1px solid var(--bad); border-radius: 10px; padding: 10px 14px; font-weight: 600; }
+.grant { display: flex; gap: 10px; align-items: center; justify-content: space-between; padding: 10px 14px; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.grant:first-child { border-top: 0; }
+.grant .what { color: var(--muted); font-size: 12px; }
+.ok-chip { background: var(--good-soft); color: var(--good); }
 .cal-when { font-weight: 600; color: var(--bad); margin: 4px 0; }
 .it.compact { grid-template-columns: 1fr auto; padding: 10px 14px; }
 button.btn.done { background: var(--good-soft); color: var(--good); border-color: var(--good); cursor: default; }
@@ -175,6 +182,7 @@ dialog select, dialog input[type=text] { width: 100%; }
     </nav>
   </div>
 </header>
+<div class="banner" id="banner" hidden></div>
 <main>
   <section id="today" class="on">
     <div class="today-top">
@@ -192,6 +200,9 @@ dialog select, dialog input[type=text] { width: 100%; }
     <h2>Last 24 hours</h2><div class="tiles" id="tiles-day"></div>
     <h2>Last 7 days</h2><div class="tiles" id="tiles-week"></div>
     <h2>Queue</h2><div class="tiles" id="tiles-queue"></div>
+    <h2>Google access</h2>
+    <div class="panel" id="grants"></div>
+    <p class="note">Each permission is a separate sign-in, so most of the work runs read-only.</p>
   </section>
 
   <section id="review">
@@ -251,6 +262,7 @@ dialog select, dialog input[type=text] { width: 100%; }
   <p class="note" id="cal-error" hidden></p>
   <div class="actions" style="justify-content:flex-end; margin-top:14px">
     <a class="btn" id="cal-open" target="_blank" rel="noopener noreferrer" style="text-decoration:none">Open in Calendar instead</a>
+    <button class="btn" id="cal-connect" hidden>Connect Calendar</button>
     <button class="btn" id="cal-cancel">Cancel</button>
     <button class="btn primary" id="cal-add">Add to Calendar</button>
   </div>
@@ -675,9 +687,12 @@ function previewCalendar(it, ref, done) {
     } catch (e) {
       // Not signed in, or Google refused: say why, and leave the link as a way out.
       $('#cal-error').textContent = e.message; $('#cal-error').hidden = false;
+      $('#cal-connect').hidden = !/signing in/.test(e.message);
       add.disabled = false; add.textContent = 'Try again';
     }
   };
+  $('#cal-connect').hidden = true;
+  $('#cal-connect').onclick = () => signIn('calendar');
   $('#cal-cancel').onclick = () => dialog.close();
   $('#cal-open').onclick = () => dialog.close();
   dialog.showModal();
@@ -743,11 +758,50 @@ async function loadSenders() {
     [el('tr', {}, el('td', {colspan: 4, class: 'empty'}, 'No known senders yet: it takes 3 matching emails.'))]));
 }
 
+// -- Google sign-in -----------------------------------------------------------------
+const GRANTS = {
+  read: ['Gmail (read)', 'Sync and triage. Without it, sync is paused.'],
+  modify: ['Gmail (change)', 'Applying labels to your mailbox (the applier, not built yet).'],
+  calendar: ['Google Calendar', 'Adding summary items to your calendar.'],
+};
+async function signIn(access) {
+  try { window.location.href = (await api('/api/auth/start', {access})).url; }
+  catch (e) { toast(e.message); }
+}
+async function loadAuth() {
+  const status = await api('/api/auth');
+  const banner = $('#banner');
+  banner.hidden = status.grants.read;
+  if (!status.grants.read) banner.replaceChildren(el('div', {},
+    'Gmail sign-in needed: sync and triage are paused.',
+    el('button', {class: 'btn primary', onclick: () => signIn('read')}, 'Sign in')));
+  $('#grants').replaceChildren(...Object.entries(GRANTS).map(([key, [name, what]]) => {
+    const ok = status.grants[key];
+    return el('div', {class: 'grant'},
+      el('div', {}, el('div', {}, name, ' ', el('span', {class: 'chip ' + (ok ? 'ok-chip' : 'by-review')}, ok ? 'connected' : 'not connected')),
+                    el('div', {class: 'what'}, what)),
+      status.web_client ? el('button', {class: 'btn' + (ok ? '' : ' primary'), onclick: () => signIn(key)}, ok ? 'Reconnect' : 'Connect')
+                        : el('span', {class: 'what'}, 'needs web_client.json'));
+  }));
+}
+// Back from Google: /oauth/callback sent us here with the result in the fragment.
+(function reportSignIn() {
+  const m = location.hash.match(/^#signin=(.*)$/);
+  if (!m) return;
+  const [kind, ...rest] = decodeURIComponent(m[1]).split(':');
+  const detail = rest.join(':');
+  toast(kind === 'ok' ? `${(GRANTS[detail] || [detail])[0]} connected` : `Sign-in failed: ${detail}`);
+  history.replaceState(null, '', location.pathname);
+})();
+
 let start = 'today';
 try { start = localStorage.getItem('tab') || start; } catch (e) {}
 show(loaders[start] ? start : 'today');
 loadSummary().catch(err => toast(err.message));
-setInterval(() => { if (document.visibilityState === 'visible') loadSummary().catch(() => {}); }, 60000);
+loadAuth().catch(() => {});
+setInterval(() => {
+  if (document.visibilityState === 'visible') { loadSummary().catch(() => {}); loadAuth().catch(() => {}); }
+}, 60000);
 </script>
 </body>
 </html>
