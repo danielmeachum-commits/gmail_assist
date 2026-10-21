@@ -309,6 +309,14 @@ function toast(text) {
   clearTimeout(toast.timer); toast.timer = setTimeout(() => t.classList.remove('on'), 2200);
 }
 const when = (iso) => iso ? new Date(iso).toLocaleString([], {month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'}) : '';
+// "3:42 PM" today, "yesterday 9:05 AM", else "Oct 19, 9:05 AM".
+function received(iso) {
+  if (!iso) return '';
+  const t = new Date(iso), now = new Date();
+  const time = t.toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'});
+  const days = Math.round((new Date(now.toDateString()) - new Date(t.toDateString())) / 86400000);
+  return days === 0 ? `today ${time}` : days === 1 ? `yesterday ${time}` : `${t.toLocaleDateString([], {month: 'short', day: 'numeric'})}, ${time}`;
+}
 const short = (label) => label ? label.replace(/^From an organization\//, '').replace(/^From a person\//, 'person/') : '—';
 function byClass(r) {
   if (r.action === 'review') return ['review', 'by-review'];
@@ -626,6 +634,8 @@ function isSoon(it) {
   const n = new Date(); const today = Date.UTC(n.getFullYear(), n.getMonth(), n.getDate());
   return then - today <= 2 * 86400000;   // within two days, or already past
 }
+// The latest arrival among an item's emails (ISO strings compare in order).
+const newest = (it) => it.emails.map(e => e.received).filter(Boolean).sort().pop();
 function itemRow(it, kind, ref) {
   const n = it.emails.length;
   return el('div', {class: `it ${kind}` + (kind === 'act' && isSoon(it) ? ' soon' : '')},
@@ -634,8 +644,9 @@ function itemRow(it, kind, ref) {
       el('div', {class: 't'}, it.title),
       it.note ? el('div', {class: 'n'}, it.note) : null,
       it.due && !it.start ? el('div', {class: 'due'}, it.due) : null,
-      el('details', {class: 'src'}, el('summary', {}, n === 1 ? '1 email' : `${n} emails`),
-         it.emails.map(e => gmailLink(e.id, `${e.sender_email || ''} — ${e.subject || '(no subject)'}`, e.unread)))),
+      el('details', {class: 'src'},
+         el('summary', {}, (n === 1 ? '1 email' : `${n} emails`) + (newest(it) ? ` · ${received(newest(it))}` : '')),
+         it.emails.map(e => gmailLink(e.id, `${received(e.received) ? received(e.received) + ' · ' : ''}${e.sender_email || ''} — ${e.subject || '(no subject)'}`, e.unread)))),
     el('div', {class: 'it-acts'}, it.start ? calendarControl(it, ref) : null));
 }
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -734,7 +745,7 @@ async function loadToday() {
   $('#needs-list').replaceChildren(...(needs.length ? needs.map(r => el('div', {class: 'it compact'},
     el('div', {},
       el('div', {class: 't'}, gmailLink(r.message_id, r.subject || '(no subject)', r.unread)),
-      el('div', {class: 'n'}, `${r.sender_email || r.sender || ''} · ${when(r.received)}`)),
+      el('div', {class: 'n'}, `${r.sender_email || r.sender || ''} · ${received(r.received)}`)),
     el('div', {class: 'it-acts'}, el('span', {class: 'chip'}, short(r.label)), attentionPicker(r)))) :
     [el('div', {class: 'empty'}, 'Nothing marked act in the last 3 days.')]));
 }

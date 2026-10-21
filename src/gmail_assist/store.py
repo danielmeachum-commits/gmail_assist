@@ -957,6 +957,14 @@ class Store:
                 select(Decision).where(Decision.id.in_([i for _, i in rows if i])))}
             return [(m, decisions.get(i)) for m, i in rows]
 
+    def received(self, account: str, ids: Iterable[str]) -> dict[str, int]:
+        """Message id -> internal_date (ms since epoch), for those that have one."""
+        with self.ReadSession() as s:
+            return {i: d for i, d in s.execute(
+                select(Message.id, Message.internal_date)
+                .where(Message.account == account, Message.id.in_(list(ids)),
+                       Message.internal_date.isnot(None)))}
+
     def add_summary(self, account: str, kind: str, period_start: datetime, period_end: datetime,
                     content: dict[str, Any], model: str | None) -> Summary:
         # SQLite keeps no zone: store UTC like every other timestamp here.

@@ -217,10 +217,15 @@ class Api:
         """Recent summaries; items already added to Calendar carry 'calendar'."""
         added = self.store.calendar_events(self.account)
         rows = [_summary_row(s) for s in self.store.summaries(self.account)]
-        for row in rows:
-            for item in row['act'] + row['read']:
-                if item.get('start') and (event := added.get(gcal.item_key(item))):
-                    item['calendar'] = {'key': event.key, 'link': event.html_link}
+        items = [item for row in rows for item in row['act'] + row['read']]
+        # Looked up now rather than stored, so older summaries get them too.
+        received = self.store.received(self.account, {e['id'] for item in items for e in item['emails']})
+        for item in items:
+            for e in item['emails']:
+                if e['id'] in received:
+                    e['received'] = datetime.fromtimestamp(received[e['id']] / 1000, timezone.utc).isoformat()
+            if item.get('start') and (event := added.get(gcal.item_key(item))):
+                item['calendar'] = {'key': event.key, 'link': event.html_link}
         return rows
 
     def add_to_calendar(self, body: dict) -> dict[str, Any]:
