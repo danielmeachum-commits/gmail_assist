@@ -6,6 +6,8 @@
 <title>Mail Triage</title>
 <style>
 :root {
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
+  --grid: #e9ebef;
   --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #667085; --line: #e4e7ec;
   --accent: #2f6fde; --accent-soft: #e8f0fd; --good: #1f8a4c; --good-soft: #e5f5ec;
   --warn: #b25e09; --warn-soft: #fdf0e1; --bad: #c4321f; --bad-soft: #fbe9e7;
@@ -17,6 +19,8 @@
     --accent: #6d9cf0; --accent-soft: #1f2b40; --good: #4cc282; --good-soft: #17301f;
     --warn: #e7a453; --warn-soft: #33261a; --bad: #ef7a69; --bad-soft: #3a1f1c;
     --chip: #252b36; --shadow: none;
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+    --grid: #262c36;
   }
 }
 * { box-sizing: border-box; }
@@ -132,6 +136,41 @@ button.cal { font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; 
   background: var(--panel); border: 1px solid var(--accent); border-radius: 6px; padding: 4px 8px; }
 button.cal:hover { background: var(--accent-soft); }
 button.undo { font: inherit; font-size: 11px; color: var(--muted); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
+/* Overview stats */
+.stat-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
+.stat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; box-shadow: var(--shadow); }
+.stat .l { color: var(--muted); font-size: 12px; }
+.stat .v { font-size: 26px; font-weight: 650; margin-top: 2px; }
+.stat .d { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.stat .d.good { color: var(--good); } .stat .d.bad { color: var(--bad); }
+.chart-card { padding: 14px 16px; margin-top: 14px; position: relative; }
+.chart-card h3 { margin: 0; font-size: 14px; }
+.chart-card .sub { color: var(--muted); font-size: 12px; margin: 2px 0 8px; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.legend span::before { content: ''; display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px;
+  vertical-align: -1px; background: var(--c); }
+svg.chart { width: 100%; height: 220px; display: block; overflow: visible; }
+svg.chart text { fill: var(--muted); font-size: 11px; }
+svg.chart .gridline { stroke: var(--grid); stroke-width: 1; }
+svg.chart .band:hover { fill: var(--text); fill-opacity: .04; }
+.grid2 { display: grid; grid-template-columns: 3fr 2fr; gap: 14px; }
+@media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
+.hbar { display: grid; grid-template-columns: minmax(90px, 38%) 1fr; gap: 8px; align-items: center; margin: 6px 0; font-size: 12px; }
+.hbar .name { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hbar .track { display: flex; align-items: center; gap: 6px; }
+.hbar .fill { height: 14px; background: var(--series-1); border-radius: 0 4px 4px 0; min-width: 2px; }
+.hbar .val { color: var(--muted); font-variant-numeric: tabular-nums; }
+.mini { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px; }
+.mini > div { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.mini .v { font-size: 20px; font-weight: 650; } .mini .l { color: var(--muted); font-size: 12px; }
+details.table-view { margin-top: 8px; font-size: 12px; }
+details.table-view summary { cursor: pointer; color: var(--muted); }
+details.table-view table { margin-top: 6px; } details.table-view td, details.table-view th { padding: 4px 8px; text-align: right; }
+details.table-view td:first-child, details.table-view th:first-child { text-align: left; }
+#tip { position: fixed; z-index: 5; pointer-events: none; background: var(--panel); color: var(--text); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.15); display: none; min-width: 140px; }
+#tip .row { display: flex; justify-content: space-between; gap: 12px; }
+#tip .row span:first-child::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; background: var(--c); }
 .banner { max-width: 1200px; margin: 12px auto 0; padding: 0 16px; }
 .banner > div { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap;
   background: var(--bad-soft); color: var(--bad); border: 1px solid var(--bad); border-radius: 10px; padding: 10px 14px; font-weight: 600; }
@@ -141,6 +180,13 @@ button.undo { font: inherit; font-size: 11px; color: var(--muted); background: n
 .ok-chip { background: var(--good-soft); color: var(--good); }
 .cal-when { font-weight: 600; color: var(--bad); margin: 4px 0; }
 .it.compact { grid-template-columns: 1fr auto; padding: 10px 14px; }
+.t-line { display: flex; gap: 8px; align-items: flex-start; }
+.tick { flex: none; width: 22px; height: 22px; margin-top: 1px; border-radius: 50%; border: 2px solid var(--muted);
+  background: var(--panel); color: #fff; font: 700 12px/18px system-ui, sans-serif; padding: 0; cursor: pointer; }
+.tick:hover { border-color: var(--good); }
+.it.done { opacity: .55; }
+.it.done .tick { background: var(--good); border-color: var(--good); }
+.it.done .t { text-decoration: line-through; }
 button.btn.done { background: var(--good-soft); color: var(--good); border-color: var(--good); cursor: default; }
 select.saved { outline: 2px solid var(--good); outline-offset: 1px; }
 .filters .spacer { flex: 1; }
@@ -179,6 +225,7 @@ dialog select, dialog input[type=text] { width: 100%; }
       <button data-tab="proposals">Proposed labels <span class="count" id="n-proposals">0</span></button>
       <button data-tab="labels">Labels</button>
       <button data-tab="senders">Known senders</button>
+      <button data-tab="settings">Settings</button>
     </nav>
   </div>
 </header>
@@ -191,16 +238,40 @@ dialog select, dialog input[type=text] { width: 100%; }
     </div>
     <div id="summary"></div>
     <div class="sec" id="sec-needs">
-      <div class="sec-h needs">Needs you <span class="hint">marked act in the last 3 days · bold = unread</span></div>
+      <div class="sec-h needs">Needs you <span class="hint">other mail marked act in the last 3 days · bold = unread</span> <span class="hint left"></span></div>
       <div class="panel list" id="needs-list"></div>
     </div>
   </section>
 
   <section id="overview">
-    <h2>Last 24 hours</h2><div class="tiles" id="tiles-day"></div>
-    <h2>Last 7 days</h2><div class="tiles" id="tiles-week"></div>
-    <h2>Queue</h2><div class="tiles" id="tiles-queue"></div>
-    <h2>Google access</h2>
+    <h2 style="margin-top:0">Last 7 days <span class="when">compared with the 7 days before</span></h2>
+    <div class="stat-tiles" id="stat-tiles"></div>
+    <div class="panel chart-card">
+      <h3>Who decided, per day</h3>
+      <div class="sub">Emails triaged in the last 14 days, by what labelled them</div>
+      <div class="legend" id="who-legend"></div>
+      <svg class="chart" id="who-chart" role="img" aria-label="Emails triaged per day, stacked by who decided"></svg>
+      <details class="table-view"><summary>Show as table</summary><table id="who-table"></table></details>
+    </div>
+    <div class="grid2">
+      <div class="panel chart-card">
+        <h3>Where mail goes</h3>
+        <div class="sub">Current label of mail received in the last 30 days</div>
+        <div id="label-bars"></div>
+      </div>
+      <div class="panel chart-card">
+        <h3>Needs you?</h3>
+        <div class="sub">Mail received in the last 7 days</div>
+        <div class="mini" id="attention-mini"></div>
+        <h3 style="margin-top:16px">Queue</h3>
+        <div class="sub">Waiting to be triaged; the backlog is processed separately</div>
+        <div class="mini" id="queue-mini"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="settings">
+    <h2 style="margin-top:0">Google access</h2>
     <div class="panel" id="grants"></div>
     <p class="note">Each permission is a separate sign-in, so most of the work runs read-only.</p>
   </section>
@@ -255,6 +326,7 @@ dialog select, dialog input[type=text] { width: 100%; }
   </section>
 </main>
 <div id="toast"></div>
+<div id="tip" role="tooltip"></div>
 <dialog id="cal-dialog">
   <h3 id="cal-title"></h3>
   <div class="cal-when" id="cal-when"></div>
@@ -327,7 +399,7 @@ function byClass(r) {
 let LABELS = [];
 
 // -- tabs ---------------------------------------------------------------------
-const loaders = {today: loadToday, overview: loadSummary, review: loadReview, recent: loadRecent,
+const loaders = {today: loadToday, overview: loadStats, settings: loadAuth, review: loadReview, recent: loadRecent,
                  proposals: loadProposals, labels: loadLabels, senders: loadSenders};
 function show(tab) {
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
@@ -338,30 +410,123 @@ function show(tab) {
 $('#tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (b) show(b.dataset.tab); });
 
 // -- overview -----------------------------------------------------------------
-function tiles(target, entries) {
-  target.replaceChildren(...entries.map(([label, n]) =>
-    el('div', {class: 'tile'}, el('div', {class: 'n'}, n ?? 0), el('div', {class: 'l'}, label))));
-}
-function byWho(counts) {
-  const total = Object.values(counts).reduce((a, b) => a + b, 0);
-  const rules = Object.entries(counts).filter(([k]) => k.startsWith('rule:')).reduce((a, [, n]) => a + n, 0);
-  const model = (counts.local || 0) + (counts.claude || 0);
-  return [['emails decided', total], ['by Gemma', counts.local], ['by Claude', counts.claude],
-          ['known sender', counts.sender], ['thread', counts.thread], ['rules', rules],
-          ['sent to review', counts.review], ['your corrections', counts.user],
-          ['Claude share of model calls', model ? Math.round(100 * (counts.claude || 0) / model) + '%' : '—']];
-}
 async function loadSummary() {
   const s = await api('/api/summary');
   $('#account').textContent = s.account;
   $('#n-review').textContent = s.review;
   $('#n-proposals').textContent = s.proposals_pending;
-  tiles($('#tiles-day'), byWho(s.day));
-  tiles($('#tiles-week'), byWho(s.week));
-  tiles($('#tiles-queue'), [['pending', s.queue.pending], ['processing', s.queue.processing],
-                            ['done', s.queue.done], ['failed', s.queue.failed]]);
   return s;
 }
+
+// -- overview stats -------------------------------------------------------------------
+// Fixed series order (reference palette slots 1-4): the stack and legend follow it.
+const WHO = [['local', 'Gemma', 'var(--series-1)'], ['claude', 'Claude', 'var(--series-2)'],
+             ['no_model', 'No model (rules, threads, known senders)', 'var(--series-3)'],
+             ['review', 'Sent to review', 'var(--series-4)']];
+const pct = (x) => x == null ? '—' : `${Math.round(x * 100)}%`;
+const SVG = 'http://www.w3.org/2000/svg';
+function svg(tag, attrs = {}) {
+  const node = document.createElementNS(SVG, tag);
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+  return node;
+}
+function showTip(ev, title, rows) {
+  const tip = $('#tip');
+  tip.replaceChildren(el('div', {style: 'font-weight:600;margin-bottom:4px'}, title),
+    ...rows.map(([name, value, color]) => el('div', {class: 'row', style: color ? `--c:${color}` : ''},
+                                             el('span', {}, name), el('b', {}, value))));
+  tip.style.display = 'block';
+  const x = Math.min(ev.clientX + 14, window.innerWidth - tip.offsetWidth - 8);
+  tip.style.left = `${x}px`; tip.style.top = `${ev.clientY + 14}px`;
+}
+const hideTip = () => { $('#tip').style.display = 'none'; };
+// One tile: value now, and the change from last week, coloured by whether that's good.
+function statTile(label, now, before, fmt, better) {
+  let delta = 'no data the week before', cls = '';
+  if (now != null && before != null) {
+    const diff = now - before;
+    if (Math.abs(diff) < 1e-9) delta = 'same as the week before';
+    else {
+      cls = better === 0 ? '' : ((diff > 0) === (better > 0) ? 'good' : 'bad');
+      delta = `${diff > 0 ? '▲' : '▼'} ${fmt === pct ? Math.abs(Math.round(diff * 100)) + ' pts' : Math.abs(diff)} vs the week before`;
+    }
+  }
+  return el('div', {class: 'stat'}, el('div', {class: 'l'}, label), el('div', {class: 'v'}, fmt(now)),
+            el('div', {class: 'd ' + cls}, delta));
+}
+function drawWhoChart(daily) {
+  const chart = $('#who-chart');
+  const W = chart.clientWidth || 600, H = 220, left = 32, bottom = 22, top = 8;
+  chart.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  chart.replaceChildren();
+  const totals = daily.map(d => WHO.reduce((a, [k]) => a + d[k], 0));
+  const max = Math.max(4, ...totals);
+  const step = [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000].find(s => max / s <= 4) || Math.ceil(max / 4);
+  const yMax = Math.ceil(max / step) * step;
+  const y = (v) => H - bottom - (v / yMax) * (H - bottom - top);
+  for (let v = 0; v <= yMax; v += step) {
+    chart.append(svg('line', {class: 'gridline', x1: left, x2: W, y1: y(v), y2: y(v)}));
+    const t = svg('text', {x: left - 6, y: y(v) + 4, 'text-anchor': 'end'}); t.textContent = v >= 1000 ? `${v / 1000}K` : v;
+    chart.append(t);
+  }
+  const band = (W - left) / daily.length, bw = Math.min(24, band * 0.6);
+  daily.forEach((d, i) => {
+    const x = left + i * band + (band - bw) / 2;
+    let base = 0;
+    const parts = WHO.filter(([k]) => d[k] > 0);
+    parts.forEach(([k, , color], j) => {
+      const y0 = y(base), y1 = y(base + d[k]);
+      base += d[k];
+      const gap = j < parts.length - 1 ? 2 : 0;    // 2px surface gap between stacked segments
+      const h = Math.max(0, y0 - y1 - gap);
+      if (j === parts.length - 1 && h > 4) {      // top segment: 4px rounded data-end
+        const r = 4, yt = y0 - h;
+        chart.append(svg('path', {fill: color, d: `M${x},${y0} V${yt + r} Q${x},${yt} ${x + r},${yt} H${x + bw - r} Q${x + bw},${yt} ${x + bw},${yt + r} V${y0} Z`}));
+      } else chart.append(svg('rect', {fill: color, x, y: y0 - h, width: bw, height: h}));
+    });
+    const [yy, mm, dd] = d.day.split('-').map(Number);
+    if (i % 2 === daily.length % 2 || i === daily.length - 1) {
+      const t = svg('text', {x: x + bw / 2, y: H - 6, 'text-anchor': 'middle'});
+      t.textContent = i === 0 || dd === 1 ? `${MONTHS[mm - 1]} ${dd}` : dd;
+      chart.append(t);
+    }
+    // Hit target: the whole day's band, bigger than the column.
+    const hit = svg('rect', {class: 'band', x: left + i * band, y: top, width: band, height: H - bottom - top, fill: 'transparent'});
+    const title = `${DAYS[new Date(Date.UTC(yy, mm - 1, dd)).getUTCDay()]}, ${MONTHS[mm - 1]} ${dd}`;
+    hit.addEventListener('mousemove', ev => showTip(ev, `${title} · ${totals[i]} emails`,
+      WHO.map(([k, name, color]) => [name.replace(/ \(.*/, ''), d[k], color])));
+    hit.addEventListener('mouseleave', hideTip);
+    chart.append(hit);
+  });
+}
+let STATS = null;
+async function loadStats() {
+  const s = STATS = await api('/api/stats');
+  const tw = s.this_week, lw = s.last_week, had = lw.triaged > 0;
+  const prev = (k) => had ? lw[k] : null;
+  $('#stat-tiles').replaceChildren(
+    statTile('Emails triaged', tw.triaged, had ? lw.triaged : null, (v) => v ?? '—', 0),
+    statTile('Handled without a model', tw.no_model_share, prev('no_model_share'), pct, +1),
+    statTile('Claude share of model calls', tw.claude_share, prev('claude_share'), pct, -1),
+    statTile('Labels you corrected', tw.correction_rate, prev('correction_rate'), pct, -1),
+    statTile('Waiting for review', s.review_open, null, (v) => v, 0));
+  $('#who-legend').replaceChildren(...WHO.map(([, name, color]) => el('span', {style: `--c:${color}`}, name)));
+  drawWhoChart(s.daily);
+  $('#who-table').replaceChildren(
+    el('tr', {}, el('th', {}, 'Day'), WHO.map(([, name]) => el('th', {}, name.replace(/ \(.*/, ''))), el('th', {}, 'Total')),
+    ...s.daily.map(d => el('tr', {}, el('td', {}, d.day), WHO.map(([k]) => el('td', {}, d[k])),
+                                 el('td', {}, WHO.reduce((a, [k]) => a + d[k], 0)))));
+  const top = Math.max(1, ...s.labels.map(l => l.n));
+  $('#label-bars').replaceChildren(...(s.labels.length ? s.labels.map(l => el('div', {class: 'hbar', title: `${l.label}: ${l.n}`},
+    el('div', {class: 'name'}, short(l.label)),
+    el('div', {class: 'track'}, el('div', {class: 'fill', style: `width:${Math.max(1, 100 * l.n / top) * 0.8}%`}),
+                                el('span', {class: 'val'}, l.n)))) : [el('div', {class: 'empty'}, 'No labelled mail yet.')]));
+  const mini = (target, entries) => target.replaceChildren(...entries.map(([label, v]) =>
+    el('div', {}, el('div', {class: 'v'}, v ?? 0), el('div', {class: 'l'}, label))));
+  mini($('#attention-mini'), [['act', s.attention.act], ['read', s.attention.read], ['skip', s.attention.skip]]);
+  mini($('#queue-mini'), [['pending', s.queue.pending], ['failed', s.queue.failed], ['done', s.queue.done]]);
+}
+window.addEventListener('resize', () => { if (STATS && $('#overview').classList.contains('on')) drawWhoChart(STATS.daily); });
 
 // -- decisions ------------------------------------------------------------------
 async function ensureLabels() {
@@ -636,18 +801,49 @@ function isSoon(it) {
 }
 // The latest arrival among an item's emails (ISO strings compare in order).
 const newest = (it) => it.emails.map(e => e.received).filter(Boolean).sort().pop();
+// A round check-off button; `item` is anything with message_ids and done.
+function tickButton(item, row, onChange) {
+  const tick = el('button', {class: 'tick'});
+  const show = () => {
+    row.classList.toggle('done', !!item.done);
+    tick.textContent = item.done ? '✓' : '';
+    tick.setAttribute('aria-pressed', String(!!item.done));
+    tick.title = tick.ariaLabel = item.done ? 'Done; tap to undo' : 'Mark done';
+  };
+  tick.addEventListener('click', async () => {
+    tick.disabled = true;
+    try {
+      item.done = (await api('/api/done', {message_ids: item.message_ids, done: !item.done})).done;
+      show(); onChange && onChange();
+    } catch (e) { toast(e.message); }
+    finally { tick.disabled = false; }
+  });
+  return [tick, show];
+}
+// "3 left" in a section's heading, from its rows.
+function updateLeft(node) {
+  const sec = node && node.closest('.sec');
+  const hint = sec && sec.querySelector('.left');
+  if (!hint) return;
+  const rows = sec.querySelectorAll('.it'), open = sec.querySelectorAll('.it:not(.done)');
+  hint.textContent = rows.length ? (open.length ? `${open.length} left` : 'all done') : '';
+}
 function itemRow(it, kind, ref) {
   const n = it.emails.length;
-  return el('div', {class: `it ${kind}` + (kind === 'act' && isSoon(it) ? ' soon' : '')},
+  const row = el('div', {class: `it ${kind}` + (kind === 'act' && isSoon(it) ? ' soon' : '')});
+  const [tick, show] = tickButton(it, row, () => updateLeft(row));
+  show();
+  row.append(
     dateBox(it),
     el('div', {},
-      el('div', {class: 't'}, it.title),
+      el('div', {class: 't-line'}, tick, el('span', {class: 't'}, it.title)),
       it.note ? el('div', {class: 'n'}, it.note) : null,
       it.due && !it.start ? el('div', {class: 'due'}, it.due) : null,
       el('details', {class: 'src'},
          el('summary', {}, (n === 1 ? '1 email' : `${n} emails`) + (newest(it) ? ` · ${received(newest(it))}` : '')),
          it.emails.map(e => gmailLink(e.id, `${received(e.received) ? received(e.received) + ' · ' : ''}${e.sender_email || ''} — ${e.subject || '(no subject)'}`, e.unread)))),
-    el('div', {class: 'it-acts'}, it.start ? calendarControl(it, ref) : null));
+    el('div', {class: 'it-acts'}, it.start ? calendarControl(it, ref, () => { show(); updateLeft(row); }) : null));
+  return row;
 }
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 function describe(p) {
@@ -662,8 +858,10 @@ function whenText(it) {
 }
 // The add button for a summary item: a preview first, then the server adds it
 // with the Calendar API. Once added: "✓ Added" (opens the event) and Undo.
-function calendarControl(it, ref) {
+function calendarControl(it, ref, onChange) {
   const box = el('div', {class: 'actions', style: 'justify-content:flex-end'});
+  // Adding checks the item off and undoing un-checks it (server side); tell the row.
+  const changed = () => { render(); onChange && onChange(); };
   const render = () => {
     if (it.calendar) {
       box.replaceChildren(
@@ -671,11 +869,14 @@ function calendarControl(it, ref) {
                  title: 'Open the event in Google Calendar'}, '✓ Added'),
         el('button', {class: 'undo', onclick: async (ev) => {
           ev.target.disabled = true;
-          try { await api('/api/calendar/undo', {key: it.calendar.key}); delete it.calendar; toast('Removed from Calendar'); render(); }
+          try {
+            it.done = (await api('/api/calendar/undo', {key: it.calendar.key})).done;
+            delete it.calendar; toast('Removed from Calendar'); changed();
+          }
           catch (e) { ev.target.disabled = false; toast(e.message); }
         }}, 'Undo'));
     } else {
-      box.replaceChildren(el('button', {class: 'cal', onclick: () => previewCalendar(it, ref, render)}, '＋ Calendar'));
+      box.replaceChildren(el('button', {class: 'cal', onclick: () => previewCalendar(it, ref, changed)}, '＋ Calendar'));
     }
   };
   render();
@@ -694,7 +895,8 @@ function previewCalendar(it, ref, done) {
     add.disabled = true; add.textContent = 'Adding…';
     try {
       it.calendar = await api('/api/calendar', {summary_id: ref.id, section: ref.section, index: ref.index});
-      dialog.close(); toast('Added to Google Calendar'); done();
+      it.done = it.calendar.done;
+      dialog.close(); toast('Added to Google Calendar and checked off'); done();
     } catch (e) {
       // Not signed in, or Google refused: say why, and leave the link as a way out.
       $('#cal-error').textContent = e.message; $('#cal-error').hidden = false;
@@ -710,15 +912,20 @@ function previewCalendar(it, ref, done) {
 }
 function renderSummary(sm) {
   const box = $('#summary');
+  renderNeeds(sm);
   if (!sm) {
     box.replaceChildren(el('div', {class: 'panel empty'}, 'No summaries yet. The first arrives at 7 AM or 6 PM, or write one now.'));
     return;
   }
   const label = {morning: 'Morning briefing', evening: 'Evening recap', manual: 'Summary'}[sm.kind] || sm.kind;
-  const section = (id, kind, title, hint, list) => el('div', {class: 'sec', id},
-    el('div', {class: `sec-h ${kind}`}, title, el('span', {class: 'hint'}, hint)),
-    el('div', {class: 'panel list'}, list.length ? list.map((it, index) => itemRow(it, kind, {id: sm.id, section: kind, index, tz: sm.tz}))
-                                                 : el('div', {class: 'empty'}, 'Nothing here.')));
+  const section = (id, kind, title, hint, list) => {
+    const sec = el('div', {class: 'sec', id},
+      el('div', {class: `sec-h ${kind}`}, title, el('span', {class: 'hint'}, hint), el('span', {class: 'hint left'})),
+      el('div', {class: 'panel list'}, list.length ? list.map((it, index) => itemRow(it, kind, {id: sm.id, section: kind, index, tz: sm.tz}))
+                                                   : el('div', {class: 'empty'}, 'Nothing here.')));
+    updateLeft(sec.firstChild);
+    return sec;
+  };
   box.replaceChildren(
     el('div', {class: 'panel hero'},
       el('div', {class: 'eyebrow'}, `${label} · ${when(sm.period_start)} – ${when(sm.period_end)}`),
@@ -726,7 +933,7 @@ function renderSummary(sm) {
       el('nav', {class: 'jump', 'aria-label': 'Sections'},
         el('a', {class: 'pill act', href: '#sec-act'}, 'To do ', el('b', {}, sm.act.length)),
         el('a', {class: 'pill read', href: '#sec-read'}, 'Worth a look ', el('b', {}, sm.read.length)),
-        el('a', {class: 'pill', href: '#sec-needs'}, 'Needs you ', el('b', {}, NEEDS.length)))),
+        el('a', {class: 'pill', href: '#sec-needs'}, 'Needs you ', el('b', {}, outsideSummary(sm).length)))),
     section('sec-act', 'act', 'To do', 'most urgent first', sm.act),
     section('sec-read', 'read', 'Worth a look', 'nothing to do', sm.read),
     el('div', {class: 'foot'}, `${sm.counts.act} act · ${sm.counts.read} read in this period · ` +
@@ -741,13 +948,31 @@ async function loadToday() {
     `${{morning: 'Morning briefing', evening: 'Evening recap', manual: 'On demand'}[sm.kind] || sm.kind} · ${when(sm.period_end)}`)) :
     [el('option', {}, 'No summaries yet')]));
   renderSummary(summaries[0]);
-  $('#n-act').textContent = needs.filter(r => r.unread).length;
-  $('#needs-list').replaceChildren(...(needs.length ? needs.map(r => el('div', {class: 'it compact'},
-    el('div', {},
-      el('div', {class: 't'}, gmailLink(r.message_id, r.subject || '(no subject)', r.unread)),
-      el('div', {class: 'n'}, `${r.sender_email || r.sender || ''} · ${received(r.received)}`)),
-    el('div', {class: 'it-acts'}, el('span', {class: 'chip'}, short(r.label)), attentionPicker(r)))) :
-    [el('div', {class: 'empty'}, 'Nothing marked act in the last 3 days.')]));
+}
+// Needs you, minus what the summary on screen already lists under To do or
+// Worth a look, so no email shows twice.
+function outsideSummary(sm) {
+  const shown = new Set(sm ? [...sm.act, ...sm.read].flatMap(it => it.emails.map(e => e.id)) : []);
+  return NEEDS.filter(r => !shown.has(r.message_id));
+}
+function renderNeeds(sm) {
+  const needs = outsideSummary(sm);
+  const badge = () => { $('#n-act').textContent = NEEDS.filter(r => r.unread && !r.done).length; };
+  badge();
+  $('#needs-list').replaceChildren(...(needs.length ? needs.map(r => {
+    r.message_ids = [r.message_id];
+    const row = el('div', {class: 'it compact'});
+    const [tick, show] = tickButton(r, row, () => { badge(); updateLeft(row); });
+    show();
+    row.append(
+      el('div', {},
+        el('div', {class: 't-line'}, tick, el('span', {class: 't'}, gmailLink(r.message_id, r.subject || '(no subject)', r.unread))),
+        el('div', {class: 'n'}, `${r.sender_email || r.sender || ''} · ${received(r.received)}`)),
+      el('div', {class: 'it-acts'}, el('span', {class: 'chip'}, short(r.label)), attentionPicker(r)));
+    return row;
+  }) : [el('div', {class: 'empty'}, NEEDS.length ? 'Everything marked act is in the summary above.'
+                                                  : 'Nothing marked act in the last 3 days.')]));
+  updateLeft($('#needs-list'));
 }
 $('#summary-pick').addEventListener('change', e => renderSummary(SUMMARIES[+e.target.value]));
 $('#summary-now').addEventListener('click', async (ev) => {

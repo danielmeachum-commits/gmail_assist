@@ -131,6 +131,9 @@ class Message(Base):
     error: Mapped[str | None] = mapped_column(Text)
     attention: Mapped[str | None] = mapped_column(String(8))   # see Attention
     attention_by: Mapped[str | None]          # 'rule:<name>', a model, or 'user'
+    # You checked it off in the dashboard (or added it to Calendar): handled.
+    done_at: Mapped[datetime | None]
+    done_by: Mapped[str | None]               # 'user' or 'calendar'
 
     def body_text(self) -> str | None:
         return parse.body_text(self.payload) if self.has_body and self.payload else None
@@ -364,6 +367,9 @@ def _migrate(engine: Engine) -> None:
         if 'attention' not in columns:
             conn.exec_driver_sql('ALTER TABLE messages ADD COLUMN attention VARCHAR(8)')
             conn.exec_driver_sql('ALTER TABLE messages ADD COLUMN attention_by VARCHAR')
+        if 'done_at' not in columns:
+            conn.exec_driver_sql('ALTER TABLE messages ADD COLUMN done_at DATETIME')
+            conn.exec_driver_sql('ALTER TABLE messages ADD COLUMN done_by VARCHAR')
         # create_all() doesn't add indexes to tables that already exist.
         conn.exec_driver_sql(
             'CREATE INDEX IF NOT EXISTS messages_sender ON messages (account, sender_email)'
@@ -722,6 +728,24 @@ class Store:
         with self.ReadSession() as s:
             return [(d, m) for d, m in s.execute(q)]
 
+    def decision_log(self, account: str, since: datetime) -> list[tuple[datetime, str, str | None, str, str | None]]:
+        """Topic decisions made since `since`: (created_at UTC, decided_by,
+        model, action, reason), oldest first."""
+        q = self._topic(
+            select(Decision.created_at, Decision.decided_by, Decision.model, Decision.action, Decision.reason)
+            .where(Decision.account == account, Decision.created_at >= since)
+        ).order_by(Decision.created_at)
+        with self.ReadSession() as s:
+            return [(c.replace(tzinfo=timezone.utc), *rest) for c, *rest in s.execute(q)]
+
+    def attention_counts(self, account: str, received_since: datetime) -> dict[str, int]:
+        q = (select(Message.attention, func.count())
+             .where(Message.account == account, Message.attention.isnot(None),
+                    Message.internal_date >= int(received_since.timestamp() * 1000))
+             .group_by(Message.attention))
+        with self.ReadSession() as s:
+            return {k: n for k, n in s.execute(q)}
+
     def decision_counts(self, account: str, since: datetime) -> dict[str, int]:
         """Topic decisions made since `since`, by who made them: 'local' or
         'claude' for a model, else decided_by ('rule:...', 'thread', 'sender',
@@ -864,13 +888,16 @@ class Store:
             raise ValueError(f'parent {name.rsplit("/", 1)[0]!r} does not exist')
         self.set_definition(account, name, description, source='user')
 
-    def label_counts(self, account: str) -> dict[str, int]:
-        """Messages currently on each label."""
+    def label_counts(self, account: str, received_since: datetime | None = None) -> dict[str, int]:
+        """Messages currently on each label (received since then, if given)."""
         latest = self._latest_topic(account)
         q = (select(Decision.label, func.count())
              .join(latest, latest.c.id == Decision.id)
              .where(Decision.action == 'label')
              .group_by(Decision.label))
+        if received_since:
+            q = (q.join(Message, (Message.account == Decision.account) & (Message.id == Decision.message_id))
+                 .where(Message.internal_date >= int(received_since.timestamp() * 1000)))
         with self.ReadSession() as s:
             return {label: n for label, n in s.execute(q)}
 
@@ -933,10 +960,11 @@ class Store:
                       .values(attention=level, attention_by=by))
 
     def attention_messages(self, account: str, levels: list[str], since: datetime,
-                           until: datetime | None = None, unread_only: bool = False
-                           ) -> list[tuple[Message, Decision | None]]:
+                           until: datetime | None = None, unread_only: bool = False,
+                           open_only: bool = False) -> list[tuple[Message, Decision | None]]:
         """Messages received in [since, until) at these attention levels,
-        newest first, each with its current topic decision."""
+        newest first, each with its current topic decision. `open_only`
+        leaves out what you've checked off."""
         latest = self._latest_topic(account)
         current = (select(Decision).join(latest, latest.c.id == Decision.id)).subquery()
         q = (
@@ -951,6 +979,8 @@ class Store:
             q = q.where(Message.internal_date < int(until.timestamp() * 1000))
         if unread_only:
             q = q.where(Message.unread)
+        if open_only:
+            q = q.where(Message.done_at.is_(None))
         with self.ReadSession() as s:
             rows = s.execute(q).all()
             decisions = {d.id: d for d in s.scalars(
@@ -964,6 +994,29 @@ class Store:
                 select(Message.id, Message.internal_date)
                 .where(Message.account == account, Message.id.in_(list(ids)),
                        Message.internal_date.isnot(None)))}
+
+    def set_done(self, account: str, ids: Iterable[str], done: bool, by: str = 'user',
+                 only_by: str | None = None) -> dict[str, str | None]:
+        """Check messages off (or back on). With `only_by`, un-check only
+        those checked off that way (e.g. by a calendar add being undone).
+        Returns each message's done_at afterwards."""
+        ids = list(ids)
+        q = update(Message).where(Message.account == account, Message.id.in_(ids))
+        if done:
+            q = q.where(Message.done_at.is_(None)).values(done_at=_now(), done_by=by)
+        else:
+            if only_by:
+                q = q.where(Message.done_by == only_by)
+            q = q.values(done_at=None, done_by=None)
+        with self.Session.begin() as s:
+            s.execute(q)
+            return {i: d.isoformat() if d else None for i, d in s.execute(
+                select(Message.id, Message.done_at).where(Message.account == account, Message.id.in_(ids)))}
+
+    def done_ids(self, account: str, ids: Iterable[str]) -> set[str]:
+        with self.ReadSession() as s:
+            return set(s.scalars(select(Message.id).where(
+                Message.account == account, Message.id.in_(list(ids)), Message.done_at.isnot(None))))
 
     def add_summary(self, account: str, kind: str, period_start: datetime, period_end: datetime,
                     content: dict[str, Any], model: str | None) -> Summary:

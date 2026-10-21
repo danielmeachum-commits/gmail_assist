@@ -213,17 +213,68 @@ class Api:
             })
         return out
 
+    def stats(self) -> dict[str, Any]:
+        """Numbers for the Overview: per-day triage by who decided (14 days),
+        7-day tiles against the 7 days before, top labels (30 days),
+        attention mix (7 days) and the queue."""
+        now = datetime.now(timezone.utc)
+        today = datetime.now().astimezone().date()
+        days = [today - timedelta(days=i) for i in range(13, -1, -1)]
+        daily = {d.isoformat(): {'local': 0, 'claude': 0, 'no_model': 0, 'review': 0} for d in days}
+        week = {'this': {}, 'last': {}}
+        for created, by, model, action, reason in self.store.decision_log(self.account, now - timedelta(days=14)):
+            if by in ('user', 'proposal'):
+                bucket = 'corrected' if by == 'user' and (reason or '').startswith('corrected') else None
+            elif action == 'review':
+                bucket = 'review'
+            elif by == 'llm':
+                bucket = 'local' if (model or '').startswith('local:') else 'claude'
+            else:
+                bucket = 'no_model'      # rules, thread labels, known senders
+            if bucket is None:
+                continue
+            day = created.astimezone().date().isoformat()
+            if bucket != 'corrected' and day in daily:
+                daily[day][bucket] += 1
+            period = 'this' if created >= now - timedelta(days=7) else 'last'
+            week[period][bucket] = week[period].get(bucket, 0) + 1
+
+        def tiles(w: dict[str, int]) -> dict[str, Any]:
+            triaged = sum(n for k, n in w.items() if k != 'corrected')
+            models = w.get('local', 0) + w.get('claude', 0)
+            return {'triaged': triaged,
+                    'no_model_share': w.get('no_model', 0) / triaged if triaged else None,
+                    'claude_share': w.get('claude', 0) / models if models else None,
+                    'correction_rate': w.get('corrected', 0) / triaged if triaged else None,
+                    'review': w.get('review', 0)}
+
+        labels = sorted(self.store.label_counts(self.account, now - timedelta(days=30)).items(),
+                        key=lambda kv: -kv[1])
+        return {
+            'daily': [{'day': d, **v} for d, v in daily.items()],
+            'this_week': tiles(week['this']), 'last_week': tiles(week['last']),
+            'labels': [{'label': k, 'n': n} for k, n in labels[:10]]
+                      + ([{'label': 'Other', 'n': sum(n for _, n in labels[10:])}] if len(labels) > 10 else []),
+            'attention': self.store.attention_counts(self.account, now - timedelta(days=7)),
+            'queue': self.store.counts(),
+            'review_open': len(self.store.review_queue(self.account)),
+        }
+
     def summaries(self) -> list[dict[str, Any]]:
         """Recent summaries; items already added to Calendar carry 'calendar'."""
         added = self.store.calendar_events(self.account)
         rows = [_summary_row(s) for s in self.store.summaries(self.account)]
         items = [item for row in rows for item in row['act'] + row['read']]
         # Looked up now rather than stored, so older summaries get them too.
-        received = self.store.received(self.account, {e['id'] for item in items for e in item['emails']})
+        ids = {e['id'] for item in items for e in item['emails']}
+        received = self.store.received(self.account, ids)
+        done = self.store.done_ids(self.account, ids)
         for item in items:
             for e in item['emails']:
                 if e['id'] in received:
                     e['received'] = datetime.fromtimestamp(received[e['id']] / 1000, timezone.utc).isoformat()
+            # An item is done when all its emails are (checked off here, or in another summary).
+            item['done'] = all(e['id'] in done for e in item['emails'])
             if item.get('start') and (event := added.get(gcal.item_key(item))):
                 item['calendar'] = {'key': event.key, 'link': event.html_link}
         return rows
@@ -246,7 +297,9 @@ class Api:
             return {'key': key, 'link': existing.html_link}
         event = self._calendar(lambda: gcal.add_event(item, local_zone()))
         self.store.add_calendar_event(self.account, key, event['id'], event.get('htmlLink'), item['title'])
-        return {'key': key, 'link': event.get('htmlLink')}
+        # On your calendar now: that counts as handled.
+        self.store.set_done(self.account, item['message_ids'], True, by='calendar')
+        return {'key': key, 'link': event.get('htmlLink'), 'done': True}
 
     def remove_from_calendar(self, body: dict) -> dict[str, Any]:
         event = self.store.calendar_events(self.account).get(body.get('key') or '')
@@ -254,7 +307,19 @@ class Api:
             raise ValueError('not in Calendar')
         self._calendar(lambda: gcal.delete_event(event.event_id))
         self.store.remove_calendar_event(self.account, event.key)
-        return {'ok': True}
+        # Un-check only what the calendar add checked off, not what you did.
+        ids = event.key.rsplit('@', 1)[0].split(',')
+        state = self.store.set_done(self.account, ids, False, only_by='calendar')
+        return {'ok': True, 'done': all(state.values())}
+
+    def set_done(self, body: dict) -> dict[str, Any]:
+        ids = body.get('message_ids')
+        if not isinstance(ids, list) or not ids or not all(isinstance(i, str) for i in ids):
+            raise ValueError('message_ids must be a list of ids')
+        state = self.store.set_done(self.account, ids, bool(body.get('done')))
+        if len(state) != len(set(ids)):
+            raise ValueError('unknown message')
+        return {'ok': True, 'done': all(state.values())}
 
     @staticmethod
     def _calendar(call):
@@ -274,10 +339,10 @@ class Api:
     def needs_you(self) -> list[dict[str, Any]]:
         """'act' mail from the last few days, newest first."""
         since = datetime.now(timezone.utc) - timedelta(days=summary.STILL_OPEN_DAYS)
-        return [_decision_row(d, m) if d else {
+        return [(_decision_row(d, m) if d else {
                     'message_id': m.id, 'received': _received(m), 'sender': m.sender,
                     'sender_email': m.sender_email, 'subject': m.subject, 'label': None,
-                    'attention': m.attention, 'unread': m.unread}
+                    'attention': m.attention, 'unread': m.unread}) | {'done': m.done_at is not None}
                 for m, d in self.store.attention_messages(self.account, ['act'], since)]
 
     def labels(self) -> list[dict[str, Any]]:
@@ -401,6 +466,7 @@ def make_handler(api: Api, allowed_hosts: set[str]) -> type[BaseHTTPRequestHandl
                 '/api/summaries': api.summaries,
                 '/api/needs-you': api.needs_you,
                 '/api/auth': api.auth_status,
+                '/api/stats': api.stats,
             }
             if url.path not in routes:
                 return self._send(HTTPStatus.NOT_FOUND, {'error': 'not found'})
@@ -438,6 +504,8 @@ def make_handler(api: Api, allowed_hosts: set[str]) -> type[BaseHTTPRequestHandl
                 self._run(api.write_summary)
             elif path == '/api/auth/start':
                 self._run(lambda: api.start_signin(body))
+            elif path == '/api/done':
+                self._run(lambda: api.set_done(body))
             elif path == '/api/calendar':
                 self._run(lambda: api.add_to_calendar(body))
             elif path == '/api/calendar/undo':

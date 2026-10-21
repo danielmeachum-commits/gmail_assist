@@ -2,7 +2,8 @@
 
 Each message gets an attention level as it's triaged (nodes.assess_attention).
 A summary takes the 'act' and 'read' mail from its period, plus 'act' mail
-from the few days before that's still unread, and has Claude write a short
+from the few days before that's still unread, leaving out anything you've
+checked off in the dashboard, and has Claude write a short
 briefing: what to do and by when, then what's worth a look. One Claude call
 per summary; with nothing to report there's no call at all.
 
@@ -106,9 +107,10 @@ def _render(msg, decision, still_open: bool) -> str:
 def write_summary(store: Store, account: str, kind: str, start: datetime, end: datetime,
                   models: Models | None = None) -> dict[str, Any]:
     """Write and store the summary for [start, end). Returns its content."""
-    in_period = store.attention_messages(account, ['act', 'read'], start, end)
+    # Mail you've already checked off in the dashboard is handled: leave it out.
+    in_period = store.attention_messages(account, ['act', 'read'], start, end, open_only=True)
     open_before = store.attention_messages(account, ['act'], start - timedelta(days=STILL_OPEN_DAYS),
-                                           start, unread_only=True)
+                                           start, unread_only=True, open_only=True)
     rows = sorted(in_period, key=lambda r: r[0].attention != 'act')[:MAX_EMAILS]
     rows += open_before[:max(0, MAX_EMAILS - len(rows))]
     open_ids = {m.id for m, _ in open_before}
