@@ -63,6 +63,8 @@ SETTINGS = {
     'label_creation': 'manual',
     # 'on': mail that arrives from a list after you unsubscribed goes to Trash.
     'trash_after_unsubscribe': 'on',
+    # 'on': decisions are applied to Gmail as labels after each sync (apply.py).
+    'apply_labels': 'on',
 }
 
 
@@ -1096,13 +1098,14 @@ class Store:
         thread (the earliest, since thread labels are fixed), or None. Only
         'label' decisions count: one sent to review gets classified afresh,
         and the rule-added Me tag isn't a topic."""
-        from gmail_assist.agent.labels import ME_LABEL
-
+        # Each message's current decision (a correction replaces the original),
+        # then the earliest message's: the thread keeps the label it started with.
+        latest = self._latest_topic(account)
         q = (
             select(Decision)
+            .join(latest, latest.c.id == Decision.id)
             .join(Message, (Message.account == Decision.account) & (Message.id == Decision.message_id))
-            .where(Decision.account == account, Message.thread_id == thread_id,
-                   Decision.action == 'label', Decision.label != ME_LABEL)
+            .where(Decision.account == account, Message.thread_id == thread_id, Decision.action == 'label')
             .order_by(Decision.created_at)
             .limit(1)
         )

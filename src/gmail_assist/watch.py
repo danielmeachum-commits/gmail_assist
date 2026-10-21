@@ -166,6 +166,7 @@ class SyncWorker(threading.Thread):
                 if self.triage:
                     self._triage(store)
                 self._trash_unsubscribed(store)
+                self._apply(store)
                 if self._wake.wait(BACKSTOP_EVERY_S):
                     time.sleep(COALESCE_S)
                 elif self.triage:
@@ -174,6 +175,18 @@ class SyncWorker(threading.Thread):
                     n = store.requeue(failed=True, stale_after_s=3600, max_attempts=MAX_ATTEMPTS)
                     if n:
                         log.info('requeued %d failed or stuck messages', n)
+
+    def _apply(self, store: Store) -> None:
+        """Put what triage decided on the messages in Gmail."""
+        from gmail_assist.apply import apply_decisions
+
+        try:
+            if n := apply_decisions(store, self.account):
+                log.info('labelled %d messages in Gmail', n)
+        except AuthRequired:
+            log.warning('labels not applied: Gmail change access is needed')
+        except Exception:
+            log.exception('applying labels failed')
 
     def _trash_unsubscribed(self, store: Store) -> None:
         """Mail from lists you've left goes to Trash as it arrives."""

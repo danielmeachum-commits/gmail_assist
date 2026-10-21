@@ -264,6 +264,7 @@ class Api:
             'proposals_pending': len(self.store.proposals(self.account, status='pending')),
             'label_creation': self.store.get_setting(self.account, 'label_creation'),
             'trash_after_unsubscribe': self.store.get_setting(self.account, 'trash_after_unsubscribe'),
+            'apply_labels': self.store.get_setting(self.account, 'apply_labels'),
             'proposal_min_messages': PROPOSAL_MIN_MESSAGES,
             'proposal_min_senders': PROPOSAL_MIN_SENDERS,
         }
@@ -647,7 +648,8 @@ class Api:
         return _summary_row(self.store.summaries(self.account, limit=1)[0])
 
     def settings(self, body: dict) -> dict[str, Any]:
-        allowed = {'label_creation': ('manual', 'auto'), 'trash_after_unsubscribe': ('on', 'off')}
+        allowed = {'label_creation': ('manual', 'auto'), 'trash_after_unsubscribe': ('on', 'off'),
+                   'apply_labels': ('on', 'off')}
         changes = {k: v for k, v in body.items() if k in allowed}
         if not changes:
             raise ValueError(f'settings: {", ".join(allowed)}')
