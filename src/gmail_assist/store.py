@@ -22,7 +22,7 @@ from typing import Any, Literal
 
 from sqlalchemy import (
     JSON, BigInteger, CheckConstraint, DateTime, Engine, Index, String, Text,
-    case, create_engine, delete, event, func, or_, select, tuple_, update,
+    case, cast, create_engine, delete, event, func, or_, select, tuple_, update,
 )
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
@@ -510,18 +510,32 @@ class Store:
 
     def subscription_stats(self, account: str, days: int = 90,
                            key: str | None = None) -> list[dict[str, Any]]:
-        """Per-list volume and read rate over the last `days`, busiest first.
+        """Per-list volume and engagement over the last `days`, busiest first.
         Pass `key` for a single list.
 
         'Read' means the UNREAD label is gone, which is the only signal Gmail
-        gives -- opening it, or marking it read, both count.
+        gives -- opening it, or marking it read, both count. `promotions`,
+        `updates` and `starred` count messages carrying that Gmail label;
+        `timed_reads` counts reads with a meaningful read_at.
         """
         since_ms = int((_now() - timedelta(days=days)).timestamp() * 1000)
+
+        def count_where(cond):
+            return func.coalesce(func.sum(case((cond, 1), else_=0)), 0)
+
+        def has_label(label: str):
+            # label_ids is a JSON array stored as text: match the quoted name.
+            return cast(Message.label_ids, Text).like(f'%"{label}"%')
+
         q = (
             select(
                 Subscription,
                 func.count(Message.id).label('received'),
-                func.coalesce(func.sum(case((Message.unread, 0), else_=1)), 0).label('read'),
+                count_where(~Message.unread).label('read'),
+                count_where(has_label('CATEGORY_PROMOTIONS')).label('promotions'),
+                count_where(has_label('CATEGORY_UPDATES')).label('updates'),
+                count_where(has_label('STARRED')).label('starred'),
+                count_where(Message.read_at.isnot(None) & Message.first_seen_unread).label('timed_reads'),
                 func.max(Message.internal_date).label('latest_ms'),
                 # Hours from arrival to (observed) read, for mail with a read time.
                 # julianday() counts days from 4713 BC; 2440587.5 is the Unix epoch.
@@ -541,14 +555,19 @@ class Store:
             return [
                 {
                     'subscription': sub,
-                    'received': received,
-                    'read': read,
-                    'read_rate': read / received if received else None,
-                    'per_week': received / (days / 7),
-                    'latest_ms': latest_ms,
-                    'avg_hours_to_read': avg_hours,
+                    'received': row.received,
+                    'read': row.read,
+                    'read_rate': row.read / row.received if row.received else None,
+                    'per_week': row.received / (days / 7),
+                    'promotions': row.promotions,
+                    'updates': row.updates,
+                    'starred': row.starred,
+                    'timed_reads': row.timed_reads,
+                    'latest_ms': row.latest_ms,
+                    'avg_hours_to_read': row.avg_hours_to_read,
                 }
-                for sub, received, read, latest_ms, avg_hours in s.execute(q)
+                for row in s.execute(q)
+                for sub in [row.Subscription]
             ]
 
     def set_subscription_status(self, account: str, key: str, status: SubscriptionStatus, *,

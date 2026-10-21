@@ -10,6 +10,7 @@ and, when tracing, as its own step under this node in the LangSmith trace.
 """
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -24,7 +25,7 @@ log = logging.getLogger(__name__)
 # Small local models do worse with very long inputs; trim bodies to this.
 MAX_BODY_CHARS = 4000
 
-LOCAL_MODEL = 'local:qwen3:8b'
+LOCAL_MODEL = 'local:gemma-3-4b-it'
 STRONG_MODEL = 'anthropic:claude-opus-5-5'
 STRONG_EFFORT = 'medium'
 # TODO: tune once you've seen real scores. Below this, an answer escalates
@@ -44,14 +45,14 @@ def after_login_check(state: EmailState) -> Literal['choose_model', '__end__']:
     return END if state.get('is_login_code') else 'choose_model'
 
 
-def acceptable(attempt: dict, labels: list[str]) -> bool:
+def acceptable(attempt: dict, labels: list[str]) -> Literal['ok', 'invalid', 'low_confidence']:
     """Whether a classify attempt is good enough to act on."""
     c = attempt['classification']
-    # TODO: also reject answers that are confident but invalid -- a label
-    # that isn't in `labels` while is_new_label is False, or a new label
-    # whose parent doesn't exist. They then escalate or go to review like a
-    # low-confidence answer.
-    return c['confidence'] >= MIN_CONFIDENCE
+    if not c['is_new_label'] and c['label'] not in labels:
+        return 'invalid'
+    if c['is_new_label'] and c['label'].rsplit('/', 1)[0] not in labels:
+        return 'invalid'
+    return 'ok' if c['confidence'] >= MIN_CONFIDENCE else 'low_confidence'
 
 
 def after_classify(state: EmailState, runtime: Runtime[Context]) -> Literal['decide', 'escalate', 'flag_review']:
@@ -60,8 +61,12 @@ def after_classify(state: EmailState, runtime: Runtime[Context]) -> Literal['dec
     this can't loop."""
     attempts = state['attempts']
     last = attempts[-1]
-    if acceptable(last, runtime.context.labels):
+    result = acceptable(last, runtime.context.labels)
+    if result == 'ok':
         return 'decide'
+    if result == 'invalid':
+        return 'flag_review'
+    
     confidence = last['classification']['confidence']
     if STRONG_MODEL not in {a['model'] for a in attempts}:
         log.info('%s confidence %.2f < %.2f: escalating to %s',
@@ -74,9 +79,6 @@ def after_classify(state: EmailState, runtime: Runtime[Context]) -> Literal['dec
 
 # -- login codes / sign-in links -----------------------------------------------
 
-# TODO: a starter pattern only, matched against the subject. Extend it (body
-# text, sender domains, "magic link" phrasing) and watch for false positives:
-# anything this matches gets trashed after a day.
 LOGIN_SUBJECT = re.compile(
     r'\b(verification code|one[- ]time (pass)?code|security code|sign[- ]?in link|'
     r'login code|your code is)\b',
@@ -99,23 +101,68 @@ def detect_login_code(state: EmailState) -> dict:
 
 # -- newsletters ----------------------------------------------------------------
 
+# Flagging only queues a list for your review; nothing unsubscribes on its
+# own. Only an 'active' list is ever changed (run.py passes
+# only_from='active'), so a list you marked 'keep' stays put.
+STATS_DAYS = 90
+MIN_DAYS_KNOWN = 21          # too new to judge before this
+MOSTLY = 0.6                 # share of a list's mail in one Gmail category
+PROMO_MIN_RECEIVED = 5       # promo_unread: enough mail to judge...
+PROMO_MAX_READ_RATE = 0.10   # ...and almost none of it opened
+UPDATES_MIN_PER_WEEK = 3     # noisy_updates: only high-volume notifications
+UPDATES_MAX_READ_RATE = 0.10
+SLOW_MIN_TIMED_READS = 3     # slow_reader: needs real read times (read_at)
+SLOW_MIN_HOURS = 72
+SLOW_MAX_READ_RATE = 0.30
+
+
+def unsubscribe_flag(stats: dict, days_known: float) -> dict | None:
+    """The first unsubscribe rule `stats` (from subscription_stats) trips,
+    as a SubscriptionFlag, or None to leave the list alone."""
+    received = stats['received']
+    if not received or days_known < MIN_DAYS_KNOWN or stats['starred']:
+        return None
+    read_rate = stats['read_rate'] or 0
+    summary = (f"opened {stats['read']} of {received} in {STATS_DAYS} days "
+               f"(~{stats['per_week']:.1f}/week)")
+
+    if (stats['promotions'] / received >= MOSTLY and received >= PROMO_MIN_RECEIVED
+            and read_rate < PROMO_MAX_READ_RATE):
+        return {'status': 'flagged', 'by': 'rule:promo_unread',
+                'reason': f'promotions you rarely open: {summary}'}
+
+    if (stats['updates'] / received >= MOSTLY and stats['per_week'] >= UPDATES_MIN_PER_WEEK
+            and read_rate < UPDATES_MAX_READ_RATE):
+        return {'status': 'flagged', 'by': 'rule:noisy_updates',
+                'reason': f'high-volume notifications you rarely open: {summary}'}
+
+    hours = stats['avg_hours_to_read']
+    if (stats['timed_reads'] >= SLOW_MIN_TIMED_READS and hours is not None
+            and hours >= SLOW_MIN_HOURS and read_rate < SLOW_MAX_READ_RATE):
+        return {'status': 'flagged', 'by': 'rule:slow_reader',
+                'reason': f'opened ~{hours / 24:.0f} days after arrival on average: {summary}'}
+
+    return None
+
+
 def review_subscription(state: EmailState, runtime: Runtime[Context]) -> dict:
     """Look at the list's history and decide whether to flag it for unsubscribing."""
     ctx = runtime.context
-    rows = ctx.store.subscription_stats(ctx.account, days=90, key=state['subscription_key'])
+    rows = ctx.store.subscription_stats(ctx.account, days=STATS_DAYS, key=state['subscription_key'])
     if not rows:
         return {'subscription_stats': None}
     row = rows[0]
-    stats = {k: row[k] for k in ('received', 'read', 'read_rate', 'per_week', 'avg_hours_to_read')}
+    stats = {k: row[k] for k in (
+        'received', 'read', 'read_rate', 'per_week', 'promotions', 'updates',
+        'starred', 'timed_reads', 'avg_hours_to_read',
+    )}
+    # SQLite hands datetimes back without a zone; they're stored as UTC.
+    first_seen = row['subscription'].first_seen.replace(tzinfo=timezone.utc)
+    days_known = (datetime.now(timezone.utc) - first_seen).total_seconds() / 86400
 
-    flag = None
-    # TODO: your unsubscribe rule. For example: at least N emails in 90 days
-    # and a read rate under X% -> flag. Only an 'active' list is ever changed
-    # (run.py passes only_from='active'), so a list you marked 'keep' stays put.
-    # if stats['received'] >= 8 and (stats['read_rate'] or 0) < 0.1:
-    #     flag = {'status': 'flagged', 'by': 'rule:low_read_rate',
-    #             'reason': f"read {stats['read']} of {stats['received']} in 90 days"}
-
+    flag = unsubscribe_flag(stats, days_known)
+    if flag:
+        log.info('flagging %s: %s', state['subscription_key'], flag['reason'])
     return {'subscription_stats': stats, 'subscription_flag': flag}
 
 
