@@ -409,6 +409,12 @@ function el(tag, attrs = {}, ...children) {
   for (const c of children.flat()) if (c !== null && c !== undefined) node.append(c instanceof Node ? c : String(c));
   return node;
 }
+// Fill a node. Unlike replaceChildren(), skip null/undefined/false (a
+// conditional part that's absent) and flatten nested arrays, as el() does --
+// replaceChildren() would print "null" or "[object HTMLDivElement]".
+function put(node, ...kids) {
+  node.replaceChildren(...kids.flat(Infinity).filter(k => k !== null && k !== undefined && k !== false));
+}
 async function api(path, body) {
   const opts = body === undefined ? {} : {
     method: 'POST', headers: {'Content-Type': 'application/json', 'X-Gmail-Assist': '1'}, body: JSON.stringify(body)};
@@ -473,7 +479,7 @@ function svg(tag, attrs = {}) {
 }
 function showTip(ev, title, rows) {
   const tip = $('#tip');
-  tip.replaceChildren(el('div', {style: 'font-weight:600;margin-bottom:4px'}, title),
+  put(tip, el('div', {style: 'font-weight:600;margin-bottom:4px'}, title),
     ...rows.map(([name, value, color]) => el('div', {class: 'row', style: color ? `--c:${color}` : ''},
                                              el('span', {}, name), el('b', {}, value))));
   tip.style.display = 'block';
@@ -499,7 +505,7 @@ function drawWhoChart(daily) {
   const chart = $('#who-chart');
   const W = chart.clientWidth || 600, H = 220, left = 32, bottom = 22, top = 8;
   chart.setAttribute('viewBox', `0 0 ${W} ${H}`);
-  chart.replaceChildren();
+  put(chart, );
   const totals = daily.map(d => WHO.reduce((a, [k]) => a + d[k], 0));
   const max = Math.max(4, ...totals);
   const step = [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000].find(s => max / s <= 4) || Math.ceil(max / 4);
@@ -545,24 +551,24 @@ async function loadStats() {
   const s = STATS = await api('/api/stats');
   const tw = s.this_week, lw = s.last_week, had = lw.triaged > 0;
   const prev = (k) => had ? lw[k] : null;
-  $('#stat-tiles').replaceChildren(
+  put($('#stat-tiles'), 
     statTile('Emails triaged', tw.triaged, had ? lw.triaged : null, (v) => v ?? '—', 0),
     statTile('Handled without a model', tw.no_model_share, prev('no_model_share'), pct, +1),
     statTile('Claude share of model calls', tw.claude_share, prev('claude_share'), pct, -1),
     statTile('Labels you corrected', tw.correction_rate, prev('correction_rate'), pct, -1),
     statTile('Waiting for review', s.review_open, null, (v) => v, 0));
-  $('#who-legend').replaceChildren(...WHO.map(([, name, color]) => el('span', {style: `--c:${color}`}, name)));
+  put($('#who-legend'), ...WHO.map(([, name, color]) => el('span', {style: `--c:${color}`}, name)));
   drawWhoChart(s.daily);
-  $('#who-table').replaceChildren(
+  put($('#who-table'), 
     el('tr', {}, el('th', {}, 'Day'), WHO.map(([, name]) => el('th', {}, name.replace(/ \(.*/, ''))), el('th', {}, 'Total')),
     ...s.daily.map(d => el('tr', {}, el('td', {}, d.day), WHO.map(([k]) => el('td', {}, d[k])),
                                  el('td', {}, WHO.reduce((a, [k]) => a + d[k], 0)))));
   const top = Math.max(1, ...s.labels.map(l => l.n));
-  $('#label-bars').replaceChildren(...(s.labels.length ? s.labels.map(l => el('div', {class: 'hbar', title: `${l.label}: ${l.n}`},
+  put($('#label-bars'), ...(s.labels.length ? s.labels.map(l => el('div', {class: 'hbar', title: `${l.label}: ${l.n}`},
     el('div', {class: 'name'}, short(l.label)),
     el('div', {class: 'track'}, el('div', {class: 'fill', style: `width:${Math.max(1, 100 * l.n / top) * 0.8}%`}),
                                 el('span', {class: 'val'}, l.n)))) : [el('div', {class: 'empty'}, 'No labelled mail yet.')]));
-  const mini = (target, entries) => target.replaceChildren(...entries.map(([label, v]) =>
+  const mini = (target, entries) => put(target, ...entries.map(([label, v]) =>
     el('div', {}, el('div', {class: 'v'}, v ?? 0), el('div', {class: 'l'}, label))));
   mini($('#attention-mini'), [['act', s.attention.act], ['read', s.attention.read], ['skip', s.attention.skip]]);
   mini($('#queue-mini'), [['pending', s.queue.pending], ['failed', s.queue.failed], ['done', s.queue.done]]);
@@ -632,7 +638,7 @@ async function loadReview() {
   await ensureLabels();
   const [rows, unsub, job] = await Promise.all([api('/api/decisions?view=review&limit=300'), api('/api/unsubscribe'),
                                                 api('/api/jobs/latest')]);
-  $('#review-rows').replaceChildren(...(rows.length ? rows.map(r => el('tr', {},
+  put($('#review-rows'), ...(rows.length ? rows.map(r => el('tr', {},
     emailCell(r), el('td', {}, labelPicker(r, {confirm: false})),
     el('td', {class: 'reason hide-sm'}, r.reason || ''))) :
     [el('tr', {}, el('td', {colspan: 3, class: 'empty'}, 'Nothing waiting for review.'))]));
@@ -690,7 +696,7 @@ function renderUnsubscribe(data) {
     selected.delete(l.key);
     r.row.classList.toggle('settled', l.settled);
     r.box.disabled = l.settled;
-    r.actions.replaceChildren(...(l.settled
+    put(r.actions, ...(l.settled
       ? [el('span', {class: 'chip ' + (status === 'keep' ? 'ok-chip' : 'by-review')}, label),
          el('button', {class: 'undo', onclick: () => setOne(l, 'active', '')}, 'Undo')]
       : buttons(l)));
@@ -768,7 +774,7 @@ function renderUnsubscribe(data) {
     rows.set(l.key, {row, box, actions, err});
     return row;
   });
-  $('#unsub-list').replaceChildren(...(lists.length ? [bar, ...items]
+  put($('#unsub-list'), ...(lists.length ? [bar, ...items]
     : [el('div', {class: 'empty'}, 'No suggestions: every list you get, you read.')]));
   for (const l of lists) if (l.unsubscribed) settle(l, 'unsubscribed', leftLabel(l.trashed));
   sync();
@@ -798,7 +804,7 @@ function showJob(job) {
     ? 90 + (job.trash_total ? 10 * job.trash_done / job.trash_total : 0) : 90 * done / Math.max(1, total);
   panel.hidden = false;
   panel.className = 'panel job' + (job.finished ? (failed.length || job.error ? ' problem' : ' done') : '');
-  panel.replaceChildren(
+  put(panel, 
     el('h3', {}, job.finished ? `Unsubscribed from ${ok.length} of ${total} lists`
                               : trashing ? 'Moving their emails to Trash…' : `Unsubscribing… ${done} of ${total} lists`,
        job.finished ? el('button', {class: 'undo', onclick: () => {
@@ -824,7 +830,7 @@ function showJob(job) {
       if (l.state === 'unsubscribed' && (!item.settled || job.finished)) {
         item.trashed = l.trashed; UNSUB.settle(item, 'unsubscribed', '✓ ' + UNSUB.leftLabel(l.trashed)); r.err.textContent = '';
       } else if (l.state === 'failed') r.err.textContent = `Not unsubscribed: ${l.detail}`;
-      else if (l.state === 'sending' && !item.settled) r.actions.replaceChildren(el('span', {class: 'chip sending'}, 'sending…'));
+      else if (l.state === 'sending' && !item.settled) put(r.actions, el('span', {class: 'chip sending'}, 'sending…'));
     }
     UNSUB.sync();
   }
@@ -887,7 +893,7 @@ async function loadProposals() {
   $('#creation-note').textContent = summary.label_creation === 'auto'
     ? `A proposal is approved automatically once ${summary.proposal_min_messages} emails from ${summary.proposal_min_senders} different senders support it.`
     : `Proposals wait here for you. One is marked ready once ${summary.proposal_min_messages} emails from ${summary.proposal_min_senders} different senders support it.`;
-  $('#proposal-cards').replaceChildren(...(props.length ? props.map(proposalCard) :
+  put($('#proposal-cards'), ...(props.length ? props.map(proposalCard) :
     [el('div', {class: 'panel empty'}, 'No proposals yet. They appear when Claude thinks mail on a parent label belongs to a recurring category.')]));
 }
 $('#creation').addEventListener('click', async e => {
@@ -922,7 +928,7 @@ function proposalCard(p) {
 async function loadLabels() {
   const labels = await api('/api/labels');
   LABELS = labels.map(l => l.name);
-  $('#label-cards').replaceChildren(...labels.map(l => {
+  put($('#label-cards'), ...labels.map(l => {
     const desc = el('textarea', {}, l.description);
     return el('div', {class: 'panel card'},
       el('h3', {}, l.name, el('span', {class: 'when'}, `${l.messages} emails`),
@@ -968,7 +974,7 @@ function newLabel(near) {
   const dialog = $('#new-label');
   const parents = LABELS.filter(n => !n.includes('/'));
   const guess = near ? near.split('/')[0] : 'From an organization';
-  $('#nl-parent').replaceChildren(el('option', {value: ''}, '(top level)'),
+  put($('#nl-parent'), el('option', {value: ''}, '(top level)'),
     ...parents.map(n => el('option', {value: n, selected: n === guess}, n)));
   $('#nl-name').value = ''; $('#nl-desc').value = '';
   dialog.showModal();
@@ -1099,7 +1105,7 @@ function calendarControl(it, ref, onChange) {
   const changed = () => { render(); onChange && onChange(); };
   const render = () => {
     if (it.calendar) {
-      box.replaceChildren(
+      put(box, 
         el('a', {class: 'cal done', href: it.calendar.link || '#', target: '_blank', rel: 'noopener noreferrer',
                  title: 'Open the event in Google Calendar'}, '✓ Added'),
         el('button', {class: 'undo', onclick: async (ev) => {
@@ -1111,7 +1117,7 @@ function calendarControl(it, ref, onChange) {
           catch (e) { ev.target.disabled = false; toast(e.message); }
         }}, 'Undo'));
     } else {
-      box.replaceChildren(el('button', {class: 'cal', onclick: () => previewCalendar(it, ref, changed)}, '＋ Calendar'));
+      put(box, el('button', {class: 'cal', onclick: () => previewCalendar(it, ref, changed)}, '＋ Calendar'));
     }
   };
   render();
@@ -1149,7 +1155,7 @@ function renderSummary(sm) {
   const box = $('#summary');
   renderNeeds(sm);
   if (!sm) {
-    box.replaceChildren(el('div', {class: 'panel empty'}, 'No summaries yet. The first arrives at 7 AM or 6 PM, or write one now.'));
+    put(box, el('div', {class: 'panel empty'}, 'No summaries yet. The first arrives at 7 AM or 6 PM, or write one now.'));
     return;
   }
   const label = {morning: 'Morning briefing', evening: 'Evening recap', manual: 'Summary'}[sm.kind] || sm.kind;
@@ -1161,7 +1167,7 @@ function renderSummary(sm) {
     updateLeft(sec.firstChild);
     return sec;
   };
-  box.replaceChildren(
+  put(box, 
     el('div', {class: 'panel hero'},
       el('div', {class: 'eyebrow'}, `${label} · ${when(sm.period_start)} – ${when(sm.period_end)}`),
       el('div', {class: 'headline'}, sm.headline),
@@ -1179,7 +1185,7 @@ async function loadToday() {
   const [summaries, needs] = await Promise.all([api('/api/summaries'), api('/api/needs-you')]);
   SUMMARIES = summaries; NEEDS = needs;
   const pick = $('#summary-pick');
-  pick.replaceChildren(...(summaries.length ? summaries.map((sm, i) => el('option', {value: i},
+  put(pick, ...(summaries.length ? summaries.map((sm, i) => el('option', {value: i},
     `${{morning: 'Morning briefing', evening: 'Evening recap', manual: 'On demand'}[sm.kind] || sm.kind} · ${when(sm.period_end)}`)) :
     [el('option', {}, 'No summaries yet')]));
   renderSummary(summaries[0]);
@@ -1194,7 +1200,7 @@ function renderNeeds(sm) {
   const needs = outsideSummary(sm);
   const badge = () => { $('#n-act').textContent = NEEDS.filter(r => r.unread && !r.done).length; };
   badge();
-  $('#needs-list').replaceChildren(...(needs.length ? needs.map(r => {
+  put($('#needs-list'), ...(needs.length ? needs.map(r => {
     r.message_ids = [r.message_id];
     const row = el('div', {class: 'it compact'});
     const [tick, show] = tickButton(r, row, () => { badge(); updateLeft(row); });
@@ -1220,7 +1226,7 @@ $('#summary-now').addEventListener('click', async (ev) => {
 // -- senders ------------------------------------------------------------------------
 async function loadSenders() {
   const rows = await api('/api/senders');
-  $('#sender-rows').replaceChildren(...(rows.length ? rows.map(r => el('tr', {},
+  put($('#sender-rows'), ...(rows.length ? rows.map(r => el('tr', {},
     el('td', {class: 'subject'}, r.sender_email),
     el('td', {}, r.label ? el('span', {class: 'chip'}, short(r.label))
                          : el('span', {class: 'chip by-review', title: r.recent_labels.join(', ')}, 'mixed: back to the models')),
@@ -1243,10 +1249,10 @@ async function loadAuth() {
   const status = await api('/api/auth');
   const banner = $('#banner');
   banner.hidden = status.grants.read;
-  if (!status.grants.read) banner.replaceChildren(el('div', {},
+  if (!status.grants.read) put(banner, el('div', {},
     'Gmail sign-in needed: sync and triage are paused.',
     el('button', {class: 'btn primary', onclick: () => signIn('read')}, 'Sign in')));
-  $('#grants').replaceChildren(...Object.entries(GRANTS).map(([key, [name, what]]) => {
+  put($('#grants'), ...Object.entries(GRANTS).map(([key, [name, what]]) => {
     const ok = status.grants[key];
     return el('div', {class: 'grant'},
       el('div', {}, el('div', {}, name, ' ', el('span', {class: 'chip ' + (ok ? 'ok-chip' : 'by-review')}, ok ? 'connected' : 'not connected')),
