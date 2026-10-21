@@ -235,6 +235,8 @@ class Api:
         # reloaded page can still show how it went).
         self.job: UnsubscribeJob | None = None
         self._job_lock = threading.Lock()
+        # Set by start(): tells serve a label changed here (see there).
+        self.on_change = lambda: None
 
     def auth_status(self) -> dict[str, Any]:
         return {'grants': {g: auth.status(g) for g in GRANTS},
@@ -596,6 +598,7 @@ class Api:
             self.account, message_id, 'label', decided_by='user', label=label, confidence=1.0,
             reason='confirmed in the dashboard' if body.get('confirm') else 'corrected in the dashboard',
         )
+        self.on_change()
         return {'ok': True}
 
     def decide_proposal(self, proposal_id: int, body: dict) -> dict[str, Any]:
@@ -609,6 +612,7 @@ class Api:
             self.account, proposal_id, 'approved' if action == 'approve' else 'rejected',
             by='user', name=name, description=(body.get('description') or '').strip() or None,
         )
+        self.on_change()
         return {'ok': True, 'relabelled': moved}
 
     def set_label(self, body: dict) -> dict[str, Any]:
@@ -626,6 +630,7 @@ class Api:
 
     def rename_label(self, body: dict) -> dict[str, Any]:
         moved = self.store.rename_label(self.account, body.get('name') or '', body.get('new_name') or '')
+        self.on_change()
         return {'ok': True, 'moved': moved}
 
     def delete_label(self, body: dict) -> dict[str, Any]:
@@ -814,15 +819,19 @@ def make_handler(api: Api, allowed_hosts: set[str]) -> type[BaseHTTPRequestHandl
 
 
 def start(account: str, db: Path | str | None = None, host: str = '127.0.0.1',
-          port: int = PORT) -> ThreadingHTTPServer:
-    """Serve the dashboard on a background thread; returns the server."""
+          port: int = PORT, on_change=None) -> ThreadingHTTPServer:
+    """Serve the dashboard on a background thread; returns the server.
+    `on_change` is called when you change a label here, so serve can apply
+    it to Gmail now rather than at its next sync."""
     store = Store(db)
     store.seed_definitions(account, DEFINITIONS)
     names = {f'{host}:{port}', f'localhost:{port}', f'127.0.0.1:{port}'}
     if ts := tailnet_name():
         # tailscale serve passes the name on unchanged, with or without its port.
         names |= {ts.lower(), f'{ts.lower()}:8443'}
-    server = ThreadingHTTPServer((host, port), make_handler(Api(store, account), names))
+    api = Api(store, account)
+    api.on_change = on_change or (lambda: None)
+    server = ThreadingHTTPServer((host, port), make_handler(api, names))
     threading.Thread(target=server.serve_forever, name='dashboard', daemon=True).start()
     log.info('dashboard on http://%s:%d (tailnet: https://%s:8443)', host, port, ts or '?')
     return server

@@ -279,10 +279,13 @@ def serve(service, topic: str, audience: str, service_account: str | None = None
 
     with Store(db) as store:
         store.seed_definitions(account, DEFINITIONS)
+    worker = None
     if dashboard_port:
         from gmail_assist import dashboard
 
-        dashboard.start(account, db, port=dashboard_port)
+        # A label you change there is applied to Gmail right away (the worker
+        # is created below; it exists by the time anyone can click).
+        dashboard.start(account, db, port=dashboard_port, on_change=lambda: worker and worker.notify())
     if triage:
         from gmail_assist.agent.llm import Models
         from gmail_assist.agent.summary import SummaryScheduler
