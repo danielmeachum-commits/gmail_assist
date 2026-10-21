@@ -18,7 +18,8 @@ DNS answer that changes in between isn't caught. The DKIM requirement means
 only a domain that signs mail to you could try that.)
 
 Once you've left a list, its emails can go to Gmail's Trash (trash_lists),
-where Gmail deletes them after 30 days; restore_list undoes it. Both use the
+where Gmail deletes them after 30 days, as can mail it sends afterwards
+(trash_new_mail, run by serve after each sync); restore_list undoes both. Both use the
 'modify' grant and touch only that list's own emails, never starred ones.
 """
 import ipaddress
@@ -111,6 +112,23 @@ def trash_lists(store: Store, account: str, keys: list[str], progress=None) -> d
     for key, messages in todo.items():
         store.add_trashed(account, key, messages)
     return {key: len(messages) for key, messages in todo.items()}
+
+
+def trash_new_mail(store: Store, account: str) -> int:
+    """Trash mail that arrived from lists after you unsubscribed (unless
+    the trash_after_unsubscribe setting is off). Run after each sync.
+    Returns how many emails were moved."""
+    if store.get_setting(account, 'trash_after_unsubscribe') != 'on':
+        return 0
+    todo = {key: [(mid, inbox) for mid, _, inbox, starred, done in entry['messages'] if not starred and not done]
+            for key, entry in store.mail_since_left(account).items()}
+    ids = [mid for messages in todo.values() for mid, _ in messages]
+    if not ids:
+        return 0
+    _batch_modify(_gmail('modify'), ids, ['TRASH'], ['INBOX'])
+    for key, messages in todo.items():
+        store.add_trashed(account, key, messages)
+    return len(ids)
 
 
 def restore_list(store: Store, account: str, key: str) -> int:

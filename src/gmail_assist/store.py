@@ -61,6 +61,8 @@ SETTINGS = {
     # 'manual': proposed sub-labels wait for you in the dashboard.
     # 'auto': one is approved as soon as it has enough supporting mail.
     'label_creation': 'manual',
+    # 'on': mail that arrives from a list after you unsubscribed goes to Trash.
+    'trash_after_unsubscribe': 'on',
 }
 
 
@@ -1244,6 +1246,32 @@ class Store:
                                                    Message.subscription_key == key))
             return [(m.id, 'INBOX' in m.label_ids) for m in msgs
                     if 'STARRED' not in m.label_ids and 'TRASH' not in m.label_ids]
+
+    def mail_since_left(self, account: str) -> dict[str, dict[str, Any]]:
+        """For each list you unsubscribed from: when, and the emails it sent
+        after that as (id, internal_date ms, in the inbox, starred, already
+        trashed by us), newest first. Lists that sent nothing since are left out."""
+        with self.ReadSession() as s:
+            subs = {sub.key: sub for sub in s.scalars(select(Subscription).where(
+                Subscription.account == account, Subscription.status == 'unsubscribed',
+                Subscription.status_at.isnot(None)))}
+            if not subs:
+                return {}
+            trashed = set(s.scalars(select(Trashed.message_id).where(Trashed.account == account)))
+            out: dict[str, dict[str, Any]] = {}
+            msgs = s.scalars(select(Message).where(Message.account == account,
+                                                   Message.subscription_key.in_(list(subs)))
+                             .order_by(Message.internal_date.desc()))
+            for m in msgs:
+                sub = subs[m.subscription_key]
+                left_ms = int(sub.status_at.replace(tzinfo=timezone.utc).timestamp() * 1000)
+                if (m.internal_date or 0) <= left_ms:
+                    continue
+                entry = out.setdefault(sub.key, {'left_at': sub.status_at.replace(tzinfo=timezone.utc),
+                                                 'messages': []})
+                entry['messages'].append((m.id, m.internal_date, 'INBOX' in m.label_ids,
+                                          'STARRED' in m.label_ids, m.id in trashed or 'TRASH' in m.label_ids))
+            return out
 
     def add_trashed(self, account: str, key: str, messages: list[tuple[str, bool]]) -> None:
         if not messages:

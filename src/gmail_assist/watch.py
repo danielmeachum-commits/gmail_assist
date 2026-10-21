@@ -165,6 +165,7 @@ class SyncWorker(threading.Thread):
                     log.exception('sync failed')
                 if self.triage:
                     self._triage(store)
+                self._trash_unsubscribed(store)
                 if self._wake.wait(BACKSTOP_EVERY_S):
                     time.sleep(COALESCE_S)
                 elif self.triage:
@@ -173,6 +174,18 @@ class SyncWorker(threading.Thread):
                     n = store.requeue(failed=True, stale_after_s=3600, max_attempts=MAX_ATTEMPTS)
                     if n:
                         log.info('requeued %d failed or stuck messages', n)
+
+    def _trash_unsubscribed(self, store: Store) -> None:
+        """Mail from lists you've left goes to Trash as it arrives."""
+        from gmail_assist import unsubscribe
+
+        try:
+            if n := unsubscribe.trash_new_mail(store, self.account):
+                log.info('moved %d emails from lists you left to Trash', n)
+        except AuthRequired:
+            log.warning('mail from lists you left stays put: Gmail change access is needed')
+        except Exception:
+            log.exception('trashing mail from lists you left failed')
 
     def _triage(self, store: Store) -> None:
         from gmail_assist.agent.run import process

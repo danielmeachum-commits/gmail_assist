@@ -57,6 +57,9 @@ MAX_BODY = 64 * 1024
 MAX_BULK = 300
 # Lists you left stay in the suggestions (marked, with Undo) this long.
 RECENTLY_LEFT_DAYS = 14
+# CAN-SPAM gives senders 10 business days to honour an unsubscribe: about
+# two weeks. Mail after that is flagged as "still sending".
+GRACE_DAYS = 14
 UNSUBSCRIBE_WORKERS = 4
 CSRF_HEADER = 'X-Gmail-Assist'
 GRANTS = ('read', 'modify', 'calendar')
@@ -260,6 +263,7 @@ class Api:
             'review': len(self.store.review_queue(self.account)),
             'proposals_pending': len(self.store.proposals(self.account, status='pending')),
             'label_creation': self.store.get_setting(self.account, 'label_creation'),
+            'trash_after_unsubscribe': self.store.get_setting(self.account, 'trash_after_unsubscribe'),
             'proposal_min_messages': PROPOSAL_MIN_MESSAGES,
             'proposal_min_senders': PROPOSAL_MIN_SENDERS,
         }
@@ -643,11 +647,40 @@ class Api:
         return _summary_row(self.store.summaries(self.account, limit=1)[0])
 
     def settings(self, body: dict) -> dict[str, Any]:
-        value = body.get('label_creation')
-        if value not in ('manual', 'auto'):
-            raise ValueError('label_creation must be manual or auto')
-        self.store.set_setting(self.account, 'label_creation', value)
+        allowed = {'label_creation': ('manual', 'auto'), 'trash_after_unsubscribe': ('on', 'off')}
+        changes = {k: v for k, v in body.items() if k in allowed}
+        if not changes:
+            raise ValueError(f'settings: {", ".join(allowed)}')
+        for key, value in changes.items():
+            if value not in allowed[key]:
+                raise ValueError(f'{key} must be {" or ".join(allowed[key])}')
+            self.store.set_setting(self.account, key, value)
         return {'ok': True}
+
+    def still_sending(self) -> dict[str, Any]:
+        """Lists you left that have emailed you since. Senders get
+        GRACE_DAYS to act on an unsubscribe; after that it's flagged."""
+        now = datetime.now(timezone.utc)
+        subs = {s.key: s for s in self.store.subscriptions(self.account)}
+        out = []
+        for key, entry in self.store.mail_since_left(self.account).items():
+            sub, msgs = subs[key], entry['messages']
+            newest = msgs[0]
+            past_grace = [m for m in msgs
+                          if m[1] / 1000 > (entry['left_at'] + timedelta(days=GRACE_DAYS)).timestamp()]
+            out.append({
+                'key': key, 'sender': sub.sender, 'sender_email': sub.sender_email,
+                'left_at': entry['left_at'].isoformat(), 'since': len(msgs), 'past_grace': len(past_grace),
+                'trashed': sum(1 for m in msgs if m[4]),
+                'latest_id': newest[0],
+                'latest_received': datetime.fromtimestamp(newest[1] / 1000, timezone.utc).isoformat(),
+                'url': next((u for u in sub.unsubscribe_urls if u.startswith(('https://', 'http://'))), None),
+                'one_click': sub.one_click,
+                'grace_ends': (entry['left_at'] + timedelta(days=GRACE_DAYS)).isoformat(),
+            })
+        out.sort(key=lambda r: (-r['past_grace'], -r['since']))
+        return {'lists': out, 'grace_days': GRACE_DAYS,
+                'auto_trash': self.store.get_setting(self.account, 'trash_after_unsubscribe') == 'on'}
 
 
 def make_handler(api: Api, allowed_hosts: set[str]) -> type[BaseHTTPRequestHandler]:
@@ -676,6 +709,7 @@ def make_handler(api: Api, allowed_hosts: set[str]) -> type[BaseHTTPRequestHandl
                 '/api/stats': api.stats,
                 '/api/unsubscribe': api.unsubscribe_suggestions,
                 '/api/jobs/latest': api.latest_job,
+                '/api/still-sending': api.still_sending,
             }
             if url.path not in routes:
                 return self._send(HTTPStatus.NOT_FOUND, {'error': 'not found'})

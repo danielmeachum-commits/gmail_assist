@@ -304,6 +304,13 @@ dialog select, dialog input[type=text] { width: 100%; }
     <h2 style="margin-top:0">Google access</h2>
     <div class="panel" id="grants"></div>
     <p class="note">Each permission is a separate sign-in, so most of the work runs read-only.</p>
+    <h2>Mailing lists</h2>
+    <div class="panel"><label class="grant" style="cursor:pointer">
+      <div><div>Trash new mail from lists you've left</div>
+        <div class="what">After each sync, anything that arrives from a list you unsubscribed from goes to Trash
+          (never starred mail). Undo on the list brings it back.</div></div>
+      <input type="checkbox" id="auto-trash" style="width:18px;height:18px">
+    </label></div>
   </section>
 
   <section id="review">
@@ -311,6 +318,12 @@ dialog select, dialog input[type=text] { width: 100%; }
       <div class="sec-h needs">Labels to check <span class="hint">the models weren't sure: pick a label and save</span></div>
       <div class="panel"><table><thead><tr><th>Email</th><th>Label</th><th class="hide-sm">Why</th></tr></thead>
         <tbody id="review-rows"></tbody></table></div>
+    </div>
+    <div class="sec" id="sec-still" hidden>
+      <div class="sec-h act">Still sending <span class="hint" id="still-hint"></span></div>
+      <p class="note" style="margin-top:0">Lists you unsubscribed from that have emailed you since. Senders get 10 business
+        days (about two weeks) to stop; after that they're flagged.</p>
+      <div class="panel" id="still-list"></div>
     </div>
     <div class="sec" id="sec-unsub">
       <div class="sec-h unsub">Unsubscribe suggestions <span class="hint" id="unsub-hint"></span></div>
@@ -446,7 +459,7 @@ function byClass(r) {
 let LABELS = [];
 
 // -- tabs ---------------------------------------------------------------------
-const loaders = {today: loadToday, overview: loadStats, settings: loadAuth, review: loadReview, recent: loadRecent,
+const loaders = {today: loadToday, overview: loadStats, settings: loadSettings, review: loadReview, recent: loadRecent,
                  proposals: loadProposals, labels: loadLabels, senders: loadSenders};
 function show(tab) {
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
@@ -644,7 +657,38 @@ async function loadReview() {
     [el('tr', {}, el('td', {colspan: 3, class: 'empty'}, 'Nothing waiting for review.'))]));
   renderUnsubscribe(unsub);
   if (job) followJob(job);      // a run in progress (or just finished) survives a reload
+  renderStillSending(await api('/api/still-sending'));
 }
+function renderStillSending(data) {
+  $('#sec-still').hidden = !data.lists.length;
+  if (!data.lists.length) return;
+  const late = data.lists.filter(l => l.past_grace).length;
+  $('#still-hint').textContent = `${data.lists.length} list${data.lists.length === 1 ? '' : 's'}` +
+    (late ? ` · ${late} past the grace period` : '') + (data.auto_trash ? ' · new mail goes to Trash' : '');
+  put($('#still-list'), data.lists.map(l => {
+    const name = (l.sender || '').replace(/\s*<.*>$/, '').replace(/^"|"$/g, '') || l.sender_email;
+    return el('div', {class: 'unsub-row', style: 'grid-template-columns: 1fr auto'},
+      el('div', {},
+        el('div', {class: 'who'}, name, ' ', el('span', {class: 'when'}, l.sender_email), ' ',
+           l.past_grace ? el('span', {class: 'chip by-review'}, 'still sending')
+                        : el('span', {class: 'chip'}, `grace period until ${new Date(l.grace_ends).toLocaleDateString([], {month: 'short', day: 'numeric'})}`)),
+        el('div', {class: 'why'}, `${l.since} email${l.since === 1 ? '' : 's'} since you left on ${new Date(l.left_at).toLocaleDateString([], {month: 'short', day: 'numeric'})}`,
+           l.trashed ? ` · ${l.trashed} moved to Trash` : ''),
+        el('div', {class: 'last'}, 'Latest: ', gmailLink(l.latest_id, 'open in Gmail', false),
+           el('span', {class: 'when'}, ` · ${received(l.latest_received)}`))),
+      el('div', {class: 'actions', style: 'justify-content:flex-end'},
+        l.url ? el('a', {class: 'cal', href: l.url, target: '_blank', rel: 'noopener noreferrer nofollow'}, 'Page ↗') : null,
+        l.one_click ? el('button', {class: 'btn', onclick: async () => {
+          try { followJob(await api('/api/unsubscribe/one-click', {keys: [l.key], trash: data.auto_trash})); toast('Sent again'); }
+          catch (e) { toast(e.message); }
+        }}, 'Try one-click again') : null));
+  }));
+}
+$('#auto-trash').addEventListener('change', async (ev) => {
+  try { await api('/api/settings', {trash_after_unsubscribe: ev.target.checked ? 'on' : 'off'});
+        toast(ev.target.checked ? 'New mail from lists you left goes to Trash' : 'New mail from lists you left stays put'); }
+  catch (e) { ev.target.checked = !ev.target.checked; toast(e.message); }
+});
 // -- unsubscribe suggestions -----------------------------------------------------------
 let UNSUB = null;          // {lists, rows, sync, settle} of the list on screen
 let jobTimer = null;
@@ -1244,6 +1288,10 @@ const GRANTS = {
 async function signIn(access) {
   try { window.location.href = (await api('/api/auth/start', {access})).url; }
   catch (e) { toast(e.message); }
+}
+async function loadSettings() {
+  const [, s] = await Promise.all([loadAuth(), api('/api/summary')]);
+  $('#auto-trash').checked = s.trash_after_unsubscribe === 'on';
 }
 async function loadAuth() {
   const status = await api('/api/auth');
