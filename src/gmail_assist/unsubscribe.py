@@ -16,6 +16,10 @@ from the email, so before posting to it:
 (The host is resolved once for the check and again by the HTTP client; a
 DNS answer that changes in between isn't caught. The DKIM requirement means
 only a domain that signs mail to you could try that.)
+
+Once you've left a list, its emails can go to Gmail's Trash (trash_lists),
+where Gmail deletes them after 30 days; restore_list undoes it. Both use the
+'modify' grant and touch only that list's own emails, never starred ones.
 """
 import ipaddress
 import socket
@@ -25,6 +29,10 @@ import httpx
 from googleapiclient.discovery import build
 
 from gmail_assist.gmail.auth import get_credentials
+from gmail_assist.store import Store
+from gmail_assist.sync import batch_call
+
+TRASH_COST = 5      # quota units per messages.trash / untrash
 
 TIMEOUT_S = 15
 USER_AGENT = 'gmail-assist (RFC 8058 one-click unsubscribe)'
@@ -75,3 +83,42 @@ def one_click(url: str, latest_message_id: str) -> str:
     if not 200 <= response.status_code < 300:
         raise Refused(f'the list answered HTTP {response.status_code}')
     return f'HTTP {response.status_code}'
+
+
+def _gmail(access: str):
+    return build('gmail', 'v1', credentials=get_credentials(access, interactive=False),
+                 cache_discovery=False)
+
+
+def trash_lists(store: Store, account: str, keys: list[str]) -> dict[str, int]:
+    """Move these lists' emails to Trash. Returns how many per list."""
+    todo = {key: store.list_message_ids(account, key) for key in keys}
+    ids = [mid for messages in todo.values() for mid, _ in messages]
+    if not ids:
+        return {key: 0 for key in keys}
+    gmail = _gmail('modify')
+    done = batch_call(gmail, ids, lambda i: gmail.users().messages().trash(userId='me', id=i), TRASH_COST)
+    counts = {}
+    for key, messages in todo.items():
+        trashed = [(mid, inbox) for mid, inbox in messages if mid in done]
+        store.add_trashed(account, key, trashed)
+        counts[key] = len(trashed)
+    return counts
+
+
+def restore_list(store: Store, account: str, key: str) -> int:
+    """Take a list's emails back out of Trash (to the inbox if they were
+    there). Returns how many."""
+    messages = store.take_trashed(account, key)
+    if not messages:
+        return 0
+    gmail = _gmail('modify')
+    batch_call(gmail, [m for m, _ in messages],
+               lambda i: gmail.users().messages().untrash(userId='me', id=i), TRASH_COST)
+    # Trash drops INBOX and untrash doesn't add it back: do that for the
+    # ones that were in the inbox.
+    inbox = [m for m, had in messages if had]
+    for start in range(0, len(inbox), 1000):
+        gmail.users().messages().batchModify(
+            userId='me', body={'ids': inbox[start:start + 1000], 'addLabelIds': ['INBOX']}).execute()
+    return len(messages)

@@ -75,9 +75,10 @@ class _Pacer:
 _pacer = _Pacer(QUOTA_UNITS_PER_S)
 
 
-def _batch_get(service, ids: list[str], fmt: str) -> list[dict]:
-    """messages.get for many ids via batch HTTP, retrying rate-limited ones.
-    Ids that 404 (deleted since they were listed) are dropped."""
+def batch_call(service, ids: list[str], request, cost: int = GET_COST) -> dict[str, dict]:
+    """Run `request(id)` (a messages.* request) for many ids via batch HTTP,
+    paced to the quota and retrying rate-limited ones. Returns responses by
+    id; ids that 404 (deleted since they were listed) are left out."""
     results: dict[str, dict] = {}
     todo = list(ids)
     for attempt in range(MAX_RETRIES + 1):
@@ -96,13 +97,10 @@ def _batch_get(service, ids: list[str], fmt: str) -> list[dict]:
 
             batch = service.new_batch_http_request(callback=callback)
             for id in chunk:
-                kwargs = {'userId': 'me', 'id': id, 'format': fmt}
-                if fmt == 'metadata':
-                    kwargs['metadataHeaders'] = METADATA_HEADERS
-                batch.add(service.users().messages().get(**kwargs), request_id=id)
+                batch.add(request(id), request_id=id)
             started = time.monotonic()
             batch.execute()
-            _pacer.wait(len(chunk) * GET_COST, started)
+            _pacer.wait(len(chunk) * cost, started)
             if retry:
                 # The quota window is spent: stop sending (every call made
                 # now just fails) and retry the rest after the backoff.
@@ -118,6 +116,18 @@ def _batch_get(service, ids: list[str], fmt: str) -> list[dict]:
         log.info('rate limited on %d messages, retrying in %.1fs', len(retry), delay)
         time.sleep(delay)
         todo = retry
+    return results
+
+
+def _batch_get(service, ids: list[str], fmt: str) -> list[dict]:
+    """messages.get for many ids, in their order."""
+    def request(id):
+        kwargs = {'userId': 'me', 'id': id, 'format': fmt}
+        if fmt == 'metadata':
+            kwargs['metadataHeaders'] = METADATA_HEADERS
+        return service.users().messages().get(**kwargs)
+
+    results = batch_call(service, ids, request)
     return [results[id] for id in ids if id in results]
 
 

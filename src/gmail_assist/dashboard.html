@@ -641,6 +641,12 @@ function renderUnsubscribe(data) {
   const go = el('button', {class: 'btn primary'}, 'Unsubscribe');
   const markBtn = el('button', {class: 'btn'}, 'Mark unsubscribed');
   const keepBtn = el('button', {class: 'btn'}, 'Keep');
+  // Leaving a list also moves its emails (the last 90 days, not starred) to
+  // Trash, where Gmail deletes them after 30 days. Undo brings them back.
+  const trashBox = el('input', {type: 'checkbox'});
+  try { trashBox.checked = localStorage.getItem('unsubTrash') !== '0'; } catch (e) { trashBox.checked = true; }
+  trashBox.addEventListener('change', () => { try { localStorage.setItem('unsubTrash', trashBox.checked ? '1' : '0'); } catch (e) {} });
+  const leftLabel = (n) => n ? `unsubscribed · ${n} trashed` : 'unsubscribed';
   const autoOpen = () => open().filter(l => l.auto);
   const sync = () => {
     const n = selected.size, autos = [...selected].filter(k => lists.find(l => l.key === k).auto).length;
@@ -669,15 +675,21 @@ function renderUnsubscribe(data) {
       : buttons(l)));
   };
   const setOne = async (l, status, label) => {
-    try { await api('/api/subscriptions', {key: l.key, status}); settle(l, status, label); sync(); toast(label || 'Back in suggestions'); }
-    catch (e) { toast(e.message); }
+    try {
+      const res = await api('/api/subscriptions', {key: l.key, status, trash: trashBox.checked});
+      settle(l, status, status === 'unsubscribed' ? leftLabel(res.moved) : label); sync();
+      toast(status === 'active' ? (res.moved ? `Back in suggestions; ${res.moved} emails restored` : 'Back in suggestions')
+                                : status === 'unsubscribed' ? leftLabel(res.moved) : label);
+    } catch (e) { toast(e.message); }
   };
   const bulkStatus = async (status, label) => {
     const keys = [...selected];
     try {
-      await api('/api/subscriptions/bulk', {keys, status});
-      keys.forEach(k => settle(lists.find(l => l.key === k), status, label));
-      sync(); toast(`${keys.length} ${status === 'keep' ? 'kept' : 'marked unsubscribed'}`);
+      const res = await api('/api/subscriptions/bulk', {keys, status, trash: trashBox.checked});
+      keys.forEach(k => settle(lists.find(l => l.key === k), status,
+                               status === 'unsubscribed' ? leftLabel((res.moved || {})[k]) : label));
+      const moved = Object.values(res.moved || {}).reduce((a, n) => a + n, 0);
+      sync(); toast(`${keys.length} ${status === 'keep' ? 'kept' : 'marked unsubscribed'}` + (moved ? `; ${moved} emails trashed` : ''));
     } catch (e) { toast(e.message); }
   };
   markBtn.addEventListener('click', () => bulkStatus('unsubscribed', 'unsubscribed'));
@@ -685,25 +697,31 @@ function renderUnsubscribe(data) {
   go.addEventListener('click', async () => {
     const keys = [...selected].filter(k => lists.find(l => l.key === k).auto);
     const skipped = selected.size - keys.length;
+    const emails = keys.reduce((a, k) => a + lists.find(l => l.key === k).received, 0);
     if (!confirm(`Send one-click unsubscribe requests to ${keys.length} list${keys.length === 1 ? '' : 's'}?` +
+                 (trashBox.checked ? `\nTheir emails (about ${emails}, none starred) go to Trash for those that accept.` : '') +
                  (skipped ? `\n${skipped} selected list${skipped === 1 ? " doesn't" : "s don't"} support it and will be left selected.` : '')))
       return;
     go.disabled = true; go.textContent = `Unsubscribing ${keys.length}…`;
     try {
-      const {results} = await api('/api/unsubscribe/one-click', {keys});
-      let ok = 0;
+      const {results, trash_error} = await api('/api/unsubscribe/one-click', {keys, trash: trashBox.checked});
+      let ok = 0, moved = 0;
       for (const res of results) {
         const l = lists.find(x => x.key === res.key), r = rows.get(res.key);
-        if (res.ok) { ok++; settle(l, 'unsubscribed', '✓ unsubscribed'); r.err.textContent = ''; }
+        if (res.ok) { ok++; moved += res.trashed || 0; settle(l, 'unsubscribed', '✓ ' + leftLabel(res.trashed)); r.err.textContent = ''; }
         else r.err.textContent = `Not unsubscribed: ${res.detail}`;
       }
-      toast(`Unsubscribed from ${ok} of ${results.length}` + (ok < results.length ? '; see the rows for why' : ''));
+      toast(`Unsubscribed from ${ok} of ${results.length}` + (moved ? `; ${moved} emails trashed` : '') +
+            (ok < results.length ? '; see the rows for why' : '') + (trash_error ? `. Mail not moved: ${trash_error}` : ''));
     } catch (e) { toast(e.message); }
     sync();
   });
   const bar = el('div', {class: 'unsub-bar'},
     el('label', {class: 'actions', style: 'gap:6px'}, all, `Select all one-click (${autoOpen().length})`),
-    count, el('span', {class: 'spacer'}), go, markBtn, keepBtn);
+    count, el('label', {class: 'actions', style: 'gap:6px;font-size:12px;color:var(--muted)',
+                        title: "Their emails from the last 90 days, except starred ones. Gmail deletes Trash after 30 days; Undo restores them."},
+                    trashBox, 'Move their emails to Trash'),
+    el('span', {class: 'spacer'}), go, markBtn, keepBtn);
 
   // -- rows
   // Unsubscribe links come from the sender's headers; open them in a new tab only.

@@ -308,8 +308,26 @@ class Api:
             raise ValueError(f'at most {MAX_BULK} at a time')
         return list(dict.fromkeys(keys))
 
+    def _gmail_change(self, call):
+        """Run a trash/restore, turning a missing sign-in into a message."""
+        try:
+            return call()
+        except AuthRequired:
+            raise ValueError('Moving mail needs Gmail change access: connect it in Settings') from None
+
+    def _after_status(self, keys: list[str], status: str, trash: bool) -> dict[str, int]:
+        """Trash the lists' emails when leaving them (if asked); put them back
+        when undoing. Returns emails moved per list."""
+        if status == 'unsubscribed' and trash:
+            return self._gmail_change(lambda: unsubscribe.trash_lists(self.store, self.account, keys))
+        if status == 'active':
+            return {k: self._gmail_change(lambda k=k: unsubscribe.restore_list(self.store, self.account, k))
+                    for k in keys}
+        return {}
+
     def bulk_subscriptions(self, body: dict) -> dict[str, Any]:
-        """Set the same status on several lists (keep / unsubscribed / active)."""
+        """Set the same status on several lists (keep / unsubscribed / active).
+        With trash, leaving a list also moves its emails to Trash."""
         status = body.get('status')
         if status not in ('keep', 'unsubscribed', 'active'):
             raise ValueError('status must be keep, unsubscribed or active')
@@ -317,7 +335,8 @@ class Api:
         for key in keys:
             self.store.set_subscription_status(self.account, key, status, by='user',
                                                reason='set in the dashboard')
-        return {'ok': True, 'updated': len(keys)}
+        moved = self._after_status(keys, status, bool(body.get('trash')))
+        return {'ok': True, 'updated': len(keys), 'moved': moved}
 
     def bulk_unsubscribe(self, body: dict) -> dict[str, Any]:
         """Send one-click unsubscribes to the selected lists; those that
@@ -347,16 +366,26 @@ class Api:
         with ThreadPoolExecutor(max_workers=UNSUBSCRIBE_WORKERS) as pool:
             results = list(pool.map(one, keys))
         log.info('one-click unsubscribe: %d of %d accepted', sum(r['ok'] for r in results), len(results))
-        return {'results': results}
+        left = [r['key'] for r in results if r['ok']]
+        trash_error = None
+        if body.get('trash') and left:
+            try:
+                moved = self._after_status(left, 'unsubscribed', True)
+                for r in results:
+                    r['trashed'] = moved.get(r['key'], 0)
+            except ValueError as err:
+                trash_error = str(err)   # unsubscribed anyway; say why the mail stayed
+        return {'results': results, 'trash_error': trash_error}
 
     def set_subscription(self, body: dict) -> dict[str, Any]:
         """keep (never suggest it again), unsubscribed (you left it), or active (undo)."""
         status = body.get('status')
         if status not in ('keep', 'unsubscribed', 'active'):
             raise ValueError('status must be keep, unsubscribed or active')
-        self.store.set_subscription_status(self.account, body.get('key') or '', status, by='user',
-                                           reason='set in the dashboard')
-        return {'ok': True}
+        key = body.get('key') or ''
+        self.store.set_subscription_status(self.account, key, status, by='user', reason='set in the dashboard')
+        moved = self._after_status([key], status, bool(body.get('trash')))
+        return {'ok': True, 'moved': moved.get(key, 0)}
 
     def summaries(self) -> list[dict[str, Any]]:
         """Recent summaries; items already added to Calendar carry 'calendar'."""

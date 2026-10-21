@@ -23,6 +23,8 @@ Tables:
                    dashboard.
   - calendar_events: events added to Google Calendar from a summary item, so
                    it isn't added twice and can be undone.
+  - trashed:       emails of lists you unsubscribed from that were moved to
+                   Gmail's Trash, so undo can put them back (see unsubscribe.py).
 """
 import os
 from collections.abc import Iterable
@@ -221,6 +223,17 @@ class CalendarEvent(Base):
     html_link: Mapped[str | None] = mapped_column(Text)
     title: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(default=_now)
+
+
+class Trashed(Base):
+    __tablename__ = 'trashed'
+    __table_args__ = (Index('trashed_list', 'account', 'list_key'),)
+
+    account: Mapped[str] = mapped_column(primary_key=True)
+    message_id: Mapped[str] = mapped_column(primary_key=True)
+    list_key: Mapped[str]
+    had_inbox: Mapped[bool]                   # put it back there on undo
+    trashed_at: Mapped[datetime] = mapped_column(default=_now)
 
 
 class Setting(Base):
@@ -1213,6 +1226,37 @@ class Store:
                                  & (Message.internal_date == newest.c.d)).where(Message.account == account)
         with self.ReadSession() as s:
             return {m.subscription_key: m for m in s.scalars(q)}
+
+    def list_message_ids(self, account: str, key: str) -> list[tuple[str, bool]]:
+        """A list's emails that cleanup may touch: (id, in the inbox), leaving
+        out starred ones and those already in the trash."""
+        with self.ReadSession() as s:
+            msgs = s.scalars(select(Message).where(Message.account == account,
+                                                   Message.subscription_key == key))
+            return [(m.id, 'INBOX' in m.label_ids) for m in msgs
+                    if 'STARRED' not in m.label_ids and 'TRASH' not in m.label_ids]
+
+    def add_trashed(self, account: str, key: str, messages: list[tuple[str, bool]]) -> None:
+        if not messages:
+            return
+        stmt = insert(Trashed).values([
+            {'account': account, 'message_id': mid, 'list_key': key, 'had_inbox': inbox, 'trashed_at': _now()}
+            for mid, inbox in messages])
+        with self.Session.begin() as s:
+            s.execute(stmt.on_conflict_do_nothing())
+
+    def take_trashed(self, account: str, key: str) -> list[tuple[str, bool]]:
+        """Forget a list's trashed emails; returns (id, had_inbox) to restore."""
+        with self.Session.begin() as s:
+            rows = list(s.scalars(select(Trashed).where(Trashed.account == account, Trashed.list_key == key)))
+            s.execute(delete(Trashed).where(Trashed.account == account, Trashed.list_key == key))
+            return [(r.message_id, r.had_inbox) for r in rows]
+
+    def trashed_counts(self, account: str) -> dict[str, int]:
+        with self.ReadSession() as s:
+            return {k: n for k, n in s.execute(
+                select(Trashed.list_key, func.count()).where(Trashed.account == account)
+                .group_by(Trashed.list_key))}
 
     def subscriptions(self, account: str, status: SubscriptionStatus | None = None) -> list[Subscription]:
         q = select(Subscription).where(Subscription.account == account)
