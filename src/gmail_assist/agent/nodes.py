@@ -66,19 +66,19 @@ def route_by_kind(state: EmailState) -> Literal['detect_login_code', 'review_sub
     return 'detect_login_code' if state['kind'] == 'personal' else 'review_subscription'
 
 
-def after_login_check(state: EmailState) -> Literal['check_thread', '__end__']:
+def after_login_check(state: EmailState) -> Literal['check_thread', 'assess_attention']:
     """A login code is fully decided ('expire'); anything else gets labelled."""
-    return END if state.get('is_login_code') else 'check_thread'
+    return 'assess_attention' if state.get('is_login_code') else 'check_thread'
 
 
-def after_thread_check(state: EmailState) -> Literal['check_sender', '__end__']:
+def after_thread_check(state: EmailState) -> Literal['check_sender', 'assess_attention']:
     """A reply in an already-labelled thread inherits that label."""
-    return END if state.get('inherited') else 'check_sender'
+    return 'assess_attention' if state.get('inherited') else 'check_sender'
 
 
-def after_sender_check(state: EmailState) -> Literal['choose_model', '__end__']:
+def after_sender_check(state: EmailState) -> Literal['choose_model', 'assess_attention']:
     """Mail from a sender that's always labelled the same way needs no model."""
-    return END if state.get('known_sender') else 'choose_model'
+    return 'assess_attention' if state.get('known_sender') else 'choose_model'
 
 
 def acceptable(attempt: dict, labels: list[str]) -> Literal['ok', 'none', 'invalid', 'low_confidence']:
@@ -369,6 +369,67 @@ def decide(state: EmailState) -> dict:
     """The last attempt passed acceptable(): label the message with it."""
     last = state['attempts'][-1]
     return {'decisions': [_decision('label', last, last['classification']['reason'])]}
+
+
+# -- attention --------------------------------------------------------------------
+
+ATTENTION_GUIDE = """\
+Decide whether this email needs the reader's attention:
+- act: the reader must do something or keep a date: a bill or payment due, a
+  payment that failed or was returned, a suspicious charge or security alert,
+  an event, appointment, RSVP or deadline, a form or document to complete or
+  fix, or a person waiting on a reply.
+- read: worth reading, but nothing to do: statements, account or policy
+  changes, school, church or community updates, messages from a doctor or
+  provider, personal news.
+- skip: nothing is lost by ignoring it: marketing, newsletters and news
+  digests, confirmations of something already done (a payment sent or
+  received, a deposit, an order placed), routine usage or activity reports."""
+LEVELS = ('act', 'read', 'skip')
+# Labels whose mail never needs you; decided without a model.
+SKIP_LABELS = {'From an organization/promotional', 'From an organization/one-time-code'}
+
+
+def _topic_label(state: EmailState) -> str | None:
+    for d in reversed(state.get('decisions', [])):
+        if d['action'] in ('label', 'review') and d.get('label') != ME_LABEL:
+            return d.get('label')
+    return None
+
+
+def assess_attention(state: EmailState, runtime: Runtime[Context]) -> dict:
+    """act / read / skip, by rule for login codes and marketing, else by the
+    local model's vote. Feeds the daily summaries; never changes the label."""
+    label = _topic_label(state)
+    if state.get('is_login_code') or label in SKIP_LABELS:
+        return {'attention': {'level': 'skip', 'by': 'rule:skip_label', 'votes': []}}
+    try:
+        llm = runtime.context.models.get(LOCAL_MODEL)
+        rng = random.Random('attention:' + state['message_id'])
+        system = SystemMessage(ATTENTION_GUIDE)
+        email = render_email(state) + (f'\nLabel: {label}' if label else '')
+        votes = []
+        for _ in range(LOCAL_VOTES):
+            order = list(LEVELS)
+            rng.shuffle(order)
+            letters = dict(zip('ABC', order))
+            menu = '\n'.join(f'{letter}) {level}' for letter, level in letters.items())
+            answer, _ = llm.choose([system, HumanMessage(
+                f'{email}\n\nDoes this need the reader? Answer with only the letter.\n{menu}')])
+            votes.append(letters.get(answer[:1].upper()))
+    except Exception as err:
+        # Attention is extra: a failure here shouldn't fail the message.
+        log.warning('attention failed: %s: %s', type(err).__name__, err)
+        return {'attention': None}
+    counted = Counter(v for v in votes if v)
+    if not counted:
+        return {'attention': None}
+    level, count = counted.most_common(1)[0]
+    if count == 1:
+        # Every vote differs: 'read' still puts it in the summaries, where
+        # Claude makes the call.
+        level = 'read'
+    return {'attention': {'level': level, 'by': LOCAL_MODEL, 'votes': votes}}
 
 
 # -- sub-labels ---------------------------------------------------------------------

@@ -33,7 +33,7 @@ trace = logging.getLogger('gmail_assist.agent.trace')
 PROPOSAL_MIN_MESSAGES = 3
 PROPOSAL_MIN_SENDERS = 2
 
-# The longest legitimate path is about 8 steps (with one escalation). A
+# The longest legitimate path is 10 steps (with one escalation). A
 # tight limit means a routing bug that loops classify -> escalate fails the
 # message after a few model calls instead of LangGraph's default 25 steps.
 RECURSION_LIMIT = 12
@@ -56,8 +56,10 @@ def load_definitions(store: Store, account: str, gmail_labels: list[str]) -> dic
     any new or changed definitions from labels.py to the store."""
     store.seed_definitions(account, DEFINITIONS)
     gmail = set(gmail_labels)
+    # Labels added here (an approved proposal, or one you created in the
+    # dashboard) may not be in Gmail yet: the applier creates them.
     return {d.name: d.description for d in store.definitions(account)
-            if d.name in gmail or d.source == 'proposal'}
+            if d.name in gmail or d.source in ('proposal', 'user')}
 
 
 def approve_ready_proposals(store: Store, account: str) -> None:
@@ -185,6 +187,8 @@ def _process_one(graph, store: Store, ctx: Context, msg: Message, live: bool) ->
             store.record_decision(account, msg.id, **d)
         if any(d.get('proposal') for d in out['decisions']):
             approve_ready_proposals(store, account)
+        if attention := out.get('attention'):
+            store.set_attention(account, msg.id, attention['level'], attention['by'])
         if flag := out.get('subscription_flag'):
             store.set_subscription_status(
                 account, msg.subscription_key, flag['status'],
@@ -192,7 +196,7 @@ def _process_one(graph, store: Store, ctx: Context, msg: Message, live: bool) ->
             )
         store.mark_done(account, msg.id, result={
             'decisions': out['decisions'], 'attempts': out.get('attempts', []),
-            'refinement': out.get('refinement'),
+            'refinement': out.get('refinement'), 'attention': out.get('attention'),
         })
         return 'done'
     except Exception as err:

@@ -1,8 +1,9 @@
 """A small web dashboard for watching triage and correcting it.
 
-Shows what was decided and by whom, the review queue, proposed sub-labels
-(approve, rename or reject them, and switch label creation between manual
-and auto), the label definitions the models see, and the senders labelled
+Shows the daily summaries and the mail that needs you, what was decided and
+by whom, the review queue, proposed sub-labels (approve, rename or reject
+them, and switch label creation between manual and auto), the labels and
+their definitions (create, rename, merge, delete), and the senders labelled
 from history. Corrections are recorded as decisions by 'user', which
 replace the earlier decision and feed sender history.
 
@@ -15,7 +16,8 @@ Requests must name this machine in their Host header (so a web page can't
 reach it by rebinding a DNS name to 127.0.0.1), and changes must be JSON
 with an X-Gmail-Assist header (which a cross-site form can't send).
 
-It reads and writes only the local store; nothing here calls Gmail.
+It reads and writes only the local store, and never calls Gmail. The one
+outside call is "write a summary now", which asks Claude like the schedule does.
 """
 import json
 import logging
@@ -29,10 +31,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from gmail_assist.agent import nodes
+from gmail_assist.agent import nodes, summary
 from gmail_assist.agent.labels import DEFINITIONS, automated, parent
 from gmail_assist.agent.run import PROPOSAL_MIN_MESSAGES, PROPOSAL_MIN_SENDERS
-from gmail_assist.store import Decision, Message, Store
+from gmail_assist.store import Decision, Message, Store, Summary
 
 log = logging.getLogger(__name__)
 
@@ -78,7 +80,16 @@ def _decision_row(d: Decision, m: Message) -> dict[str, Any]:
         'reason': d.reason,
         'proposal_id': d.proposal_id,
         'decided_at': _iso(d.created_at),
+        'attention': m.attention,
+        'attention_by': m.attention_by,
+        'unread': m.unread,
     }
+
+
+def _summary_row(s: Summary) -> dict[str, Any]:
+    return {'id': s.id, 'kind': s.kind, 'period_start': _iso(s.period_start),
+            'period_end': _iso(s.period_end), 'created_at': _iso(s.created_at),
+            'model': s.model, **s.content}
 
 
 class Api:
@@ -137,10 +148,20 @@ class Api:
             })
         return out
 
+    def summaries(self) -> list[dict[str, Any]]:
+        return [_summary_row(s) for s in self.store.summaries(self.account)]
+
+    def needs_you(self) -> list[dict[str, Any]]:
+        """'act' mail from the last few days, newest first."""
+        since = datetime.now(timezone.utc) - timedelta(days=summary.STILL_OPEN_DAYS)
+        return [_decision_row(d, m) if d else {
+                    'message_id': m.id, 'received': _received(m), 'sender': m.sender,
+                    'sender_email': m.sender_email, 'subject': m.subject, 'label': None,
+                    'attention': m.attention, 'unread': m.unread}
+                for m, d in self.store.attention_messages(self.account, ['act'], since)]
+
     def labels(self) -> list[dict[str, Any]]:
-        counts: dict[str, int] = {}
-        for d, _ in self.store.recent_decisions(self.account, limit=1_000_000, action='label'):
-            counts[d.label] = counts.get(d.label, 0) + 1
+        counts = self.store.label_counts(self.account)
         return [{'name': d.name, 'description': d.description, 'source': d.source,
                  'builtin': DEFINITIONS.get(d.name), 'updated_at': _iso(d.updated_at),
                  'messages': counts.get(d.name, 0), 'parent': parent(d.name)}
@@ -202,6 +223,33 @@ class Api:
         self.store.set_definition(self.account, name, description, source='user')
         return {'ok': True}
 
+    def create_label(self, body: dict) -> dict[str, Any]:
+        self.store.create_label(self.account, body.get('name') or '', body.get('description') or '')
+        return {'ok': True}
+
+    def rename_label(self, body: dict) -> dict[str, Any]:
+        moved = self.store.rename_label(self.account, body.get('name') or '', body.get('new_name') or '')
+        return {'ok': True, 'moved': moved}
+
+    def delete_label(self, body: dict) -> dict[str, Any]:
+        self.store.delete_label(self.account, body.get('name') or '')
+        return {'ok': True}
+
+    def attention(self, body: dict) -> dict[str, Any]:
+        level = body.get('level')
+        if level not in nodes.LEVELS:
+            raise ValueError(f'level must be one of {", ".join(nodes.LEVELS)}')
+        if self.store.get_message(self.account, body.get('message_id') or '') is None:
+            raise ValueError('unknown message')
+        self.store.set_attention(self.account, body['message_id'], level, 'user')
+        return {'ok': True}
+
+    def write_summary(self) -> dict[str, Any]:
+        """An extra summary now, covering the 24 hours to now."""
+        end = datetime.now(timezone.utc)
+        summary.write_summary(self.store, self.account, 'manual', end - timedelta(days=1), end)
+        return _summary_row(self.store.summaries(self.account, limit=1)[0])
+
     def settings(self, body: dict) -> dict[str, Any]:
         value = body.get('label_creation')
         if value not in ('manual', 'auto'):
@@ -228,6 +276,8 @@ def make_handler(api: Api, allowed_hosts: set[str]) -> type[BaseHTTPRequestHandl
                 '/api/proposals': api.proposals,
                 '/api/labels': api.labels,
                 '/api/senders': api.senders,
+                '/api/summaries': api.summaries,
+                '/api/needs-you': api.needs_you,
             }
             if url.path not in routes:
                 return self._send(HTTPStatus.NOT_FOUND, {'error': 'not found'})
@@ -253,6 +303,16 @@ def make_handler(api: Api, allowed_hosts: set[str]) -> type[BaseHTTPRequestHandl
                 self._run(lambda: api.decide_proposal(int(path.rsplit('/', 1)[1]), body))
             elif path == '/api/labels':
                 self._run(lambda: api.set_label(body))
+            elif path == '/api/labels/create':
+                self._run(lambda: api.create_label(body))
+            elif path == '/api/labels/rename':
+                self._run(lambda: api.rename_label(body))
+            elif path == '/api/labels/delete':
+                self._run(lambda: api.delete_label(body))
+            elif path == '/api/attention':
+                self._run(lambda: api.attention(body))
+            elif path == '/api/summaries':
+                self._run(api.write_summary)
             elif path == '/api/settings':
                 self._run(lambda: api.settings(body))
             else:
@@ -294,6 +354,7 @@ def start(account: str, db: Path | str | None = None, host: str = '127.0.0.1',
           port: int = PORT) -> ThreadingHTTPServer:
     """Serve the dashboard on a background thread; returns the server."""
     store = Store(db)
+    store.seed_definitions(account, DEFINITIONS)
     names = {f'{host}:{port}', f'localhost:{port}', f'127.0.0.1:{port}'}
     if ts := tailnet_name():
         # tailscale serve passes the name on unchanged, with or without its port.

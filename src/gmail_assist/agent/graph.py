@@ -1,20 +1,23 @@
 """The email triage graph.
 
-    START ─► tag_me ─► route_by_kind ─┬─ personal ─► detect_login_code ─┬─ login code ─► END
+    START ─► tag_me ─► route_by_kind ─┬─ personal ─► detect_login_code ─┬─ login code ─► (attention)
                                       │                                 └─ otherwise ──► check_thread
                                       └─ bulk ─────► review_subscription ──────────────► check_thread
 
-    check_thread ─┬─ thread already labelled ─► END (inherits it)
+    check_thread ─┬─ thread already labelled ─► (attention), inheriting it
                   └─ new thread ──────────────► check_sender
 
-    check_sender ─┬─ automated, sender always labelled the same ─► END (that label)
+    check_sender ─┬─ automated, sender always labelled the same ─► (attention), that label
                   └─ otherwise ──────────────────────────────────► choose_model
 
-    choose_model ─► classify ─► after_classify ─┬─ confident ──────────► decide ──────► END
-       (local)         ▲                        ├─ confident, parent ──► refine_parent ► END
+    choose_model ─► classify ─► after_classify ─┬─ confident ──────────► decide ──────► (attention)
+       (local)         ▲                        ├─ confident, parent ──► refine_parent ► (attention)
                        │                        ├─ unsure, local only ─► escalate ─┐
-                       │                        └─ unsure, strong ─────► flag_review ─► END
+                       │                        └─ unsure, strong ─────► flag_review ─► (attention)
                        └───────────────────────────────────────────────────────────┘
+
+    (attention) = assess_attention ─► END: act / read / skip for the daily
+    summaries, whichever way the label was decided.
 
     refine_parent picks an existing sub-label, or files the message under a
     proposed one (labelled with the parent until it's approved), or keeps it.
@@ -39,6 +42,7 @@ def build_graph():
     builder.add_node('decide', nodes.decide)
     builder.add_node('refine_parent', nodes.refine_parent)
     builder.add_node('flag_review', nodes.flag_review)
+    builder.add_node('assess_attention', nodes.assess_attention)
 
     builder.add_edge(START, 'tag_me')
     builder.add_conditional_edges('tag_me', nodes.route_by_kind)
@@ -49,8 +53,9 @@ def build_graph():
     builder.add_edge('choose_model', 'classify')
     builder.add_conditional_edges('classify', nodes.after_classify)
     builder.add_edge('escalate', 'classify')
-    builder.add_edge('decide', END)
-    builder.add_edge('refine_parent', END)
-    builder.add_edge('flag_review', END)
+    builder.add_edge('decide', 'assess_attention')
+    builder.add_edge('refine_parent', 'assess_attention')
+    builder.add_edge('flag_review', 'assess_attention')
+    builder.add_edge('assess_attention', END)
 
     return builder.compile()

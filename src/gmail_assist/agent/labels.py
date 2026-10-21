@@ -8,8 +8,9 @@ there too. Labels in Gmail without a definition are never offered to a model.
 
 Writing a definition: say what belongs, in general terms ("bank and card
 alerts"), not who sends it. Name an organization or person only when the
-model couldn't work it out from the email itself -- a private group, or an acronym it may not know. Specific well-known senders belong in
-the examples (examples.json) or are learned from sender history.
+model couldn't work it out from the email itself -- a private group, or an acronym a small model may not know. Specific
+well-known senders belong in the examples (examples.json) or are learned
+from sender history.
 """
 import json
 import re
@@ -45,7 +46,7 @@ DEFINITIONS: dict[str, str] = {
         'from people. Never automated mail.',
     'From an organization':
         'Automated or organizational mail that fits none of the sub-labels: service '
-        'notices, account settings, parental-control and family-app notices.',
+        'notices, account settings, family-app notices (e.g. Google Family Link).',
     'From an organization/account-alerts':
         'Alerts about your accounts that need no payment: bank and card transaction '
         'or fraud alerts, utility usage alerts, insurance policy documents.',
@@ -58,7 +59,7 @@ DEFINITIONS: dict[str, str] = {
         'Job postings, recruiters, job applications and hiring.',
     'From an organization/community':
         'Volunteer groups, clubs, HOA, nonprofits and civic groups you are involved '
-        'with, including their newsletters. Not churches (religious) or schools (school).',
+        'with, including their newsletters.',
     'From an organization/military':
         'Military and veteran organizations and services.',
     'From an organization/one-time-code':

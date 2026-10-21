@@ -83,6 +83,24 @@ button.danger { color: var(--bad); }
   padding: 8px 14px; border-radius: 8px; opacity: 0; transition: opacity .2s; pointer-events: none; }
 #toast.on { opacity: 1; }
 .edited { color: var(--warn); font-size: 11px; }
+.att-act { background: var(--bad-soft); color: var(--bad); }
+.att-read { background: var(--accent-soft); color: var(--accent); }
+.att-skip { background: var(--chip); color: var(--muted); }
+select.att { padding: 1px 4px; font-size: 12px; border-radius: 10px; }
+.brief { padding: 16px; }
+.brief .headline { font-size: 15px; font-weight: 600; margin: 4px 0 12px; }
+.brief h4 { margin: 14px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.item { padding: 8px 0; border-top: 1px solid var(--line); }
+.item:first-of-type { border-top: 0; }
+.item .t { font-weight: 600; } .item .due { color: var(--bad); font-weight: 600; margin-left: 6px; font-size: 12px; }
+.item .links { font-size: 12px; margin-top: 2px; }
+.item .links a { color: var(--accent); text-decoration: none; margin-right: 10px; overflow-wrap: anywhere; }
+.unread { font-weight: 600; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: space-between; }
+dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--text); width: min(480px, calc(100vw - 32px)); padding: 16px; }
+dialog::backdrop { background: rgba(0,0,0,.35); }
+dialog h3 { margin: 0 0 8px; font-size: 15px; }
+dialog select, dialog input[type=text] { width: 100%; }
 @media (max-width: 720px) {
   .hide-sm { display: none; }
   th, td { padding: 8px 6px; }
@@ -95,17 +113,29 @@ button.danger { color: var(--bad); }
     <h1>Mail triage</h1>
     <div class="sub" id="account">loading…</div>
     <nav id="tabs">
-      <button data-tab="overview" class="on">Overview</button>
+      <button data-tab="today" class="on">Today <span class="count" id="n-act">0</span></button>
+      <button data-tab="overview">Overview</button>
       <button data-tab="review">Review <span class="count" id="n-review">0</span></button>
       <button data-tab="recent">Recent</button>
       <button data-tab="proposals">Proposed labels <span class="count" id="n-proposals">0</span></button>
-      <button data-tab="labels">Definitions</button>
+      <button data-tab="labels">Labels</button>
       <button data-tab="senders">Known senders</button>
     </nav>
   </div>
 </header>
 <main>
-  <section id="overview" class="on">
+  <section id="today" class="on">
+    <div class="row">
+      <select id="summary-pick" aria-label="Summary"></select>
+      <button class="btn" id="summary-now">Write one now</button>
+    </div>
+    <div class="panel brief" id="summary" style="margin-top:10px"></div>
+    <h2>Needs you <span class="when">(marked act in the last 3 days; bold = unread)</span></h2>
+    <div class="panel"><table><thead><tr><th>Email</th><th>Label</th><th>Needs you?</th></tr></thead>
+      <tbody id="needs-rows"></tbody></table></div>
+  </section>
+
+  <section id="overview">
     <h2>Last 24 hours</h2><div class="tiles" id="tiles-day"></div>
     <h2>Last 7 days</h2><div class="tiles" id="tiles-week"></div>
     <h2>Queue</h2><div class="tiles" id="tiles-queue"></div>
@@ -143,7 +173,12 @@ button.danger { color: var(--bad); }
   </section>
 
   <section id="labels">
-    <p class="note">What each label means, exactly as the models are told. Editing one here overrides labels.py for that label.</p>
+    <div class="row">
+      <p class="note" style="margin:0">What each label means, exactly as the models are told. A definition you edit here overrides labels.py.
+        Renaming moves its emails (and sub-labels) along; renaming onto an existing label merges them.
+        Gmail's own labels follow once the applier is running.</p>
+      <button class="btn primary" id="label-new">New label</button>
+    </div>
     <div class="cards" id="label-cards" style="margin-top:12px"></div>
   </section>
 
@@ -154,6 +189,19 @@ button.danger { color: var(--bad); }
   </section>
 </main>
 <div id="toast"></div>
+<dialog id="new-label">
+  <form method="dialog" id="new-label-form">
+    <h3>New label</h3>
+    <div class="field"><label for="nl-parent">Under</label><select id="nl-parent"></select></div>
+    <div class="field"><label for="nl-name">Name</label><input type="text" id="nl-name" placeholder="e.g. health" required></div>
+    <div class="field"><label for="nl-desc">Definition: what belongs here, in general terms</label>
+      <textarea id="nl-desc" required placeholder="e.g. Doctors, clinics, pharmacies and health insurers."></textarea></div>
+    <div class="actions" style="justify-content:flex-end">
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn primary" value="ok">Create</button>
+    </div>
+  </form>
+</dialog>
 
 <script>
 'use strict';
@@ -193,7 +241,7 @@ function byClass(r) {
 let LABELS = [];
 
 // -- tabs ---------------------------------------------------------------------
-const loaders = {overview: loadSummary, review: loadReview, recent: loadRecent,
+const loaders = {today: loadToday, overview: loadSummary, review: loadReview, recent: loadRecent,
                  proposals: loadProposals, labels: loadLabels, senders: loadSenders};
 function show(tab) {
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
@@ -241,8 +289,19 @@ function emailCell(r) {
     el('div', {class: 'when'}, when(r.received)));
 }
 function labelPicker(r, {confirm}) {
-  const select = el('select', {}, LABELS.map(name => el('option', {value: name, selected: name === r.label}, name)));
+  const select = el('select', {}, LABELS.map(name => el('option', {value: name, selected: name === r.label}, name)),
+                    el('option', {value: '+new'}, '+ New label…'));
   if (!r.label) select.prepend(el('option', {value: '', selected: true}, 'choose…'));
+  let previous = select.value;
+  select.addEventListener('change', async (ev) => {
+    if (select.value !== '+new') { previous = select.value; return; }
+    ev.stopImmediatePropagation();
+    const name = await newLabel(r.label);
+    if (!name) { select.value = previous; return; }
+    select.add(el('option', {value: name}, name), select.options[select.options.length - 1]);
+    select.value = previous = name;
+    select.dispatchEvent(new Event('change'));
+  });
   const save = async (label, isConfirm) => {
     if (!label) return;
     await api('/api/feedback', {message_id: r.message_id, label, confirm: isConfirm});
@@ -250,9 +309,11 @@ function labelPicker(r, {confirm}) {
   };
   const wrap = el('div', {class: 'actions'}, select);
   if (confirm) {
-    select.addEventListener('change', () => save(select.value, false).catch(e => toast(e.message)));
+    // ✓ confirms what the dropdown shows now, not the label the row loaded with.
+    select.addEventListener('change', () => save(select.value, false).then(() => { r.label = select.value; })
+                                               .catch(e => toast(e.message)));
     if (r.label && r.decided_by !== 'user')
-      wrap.append(el('button', {class: 'btn', title: 'Confirm this label', onclick: () => save(r.label, true).catch(e => toast(e.message))}, '✓'));
+      wrap.append(el('button', {class: 'btn', title: 'Confirm this label', onclick: () => save(select.value, true).catch(e => toast(e.message))}, '✓'));
   } else {
     wrap.append(el('button', {class: 'btn primary', onclick: async (ev) => {
       try { await save(select.value, select.value === r.label); ev.target.closest('tr').remove(); loadSummary(); }
@@ -283,7 +344,7 @@ async function loadRecent() {
     const [who, cls] = byClass(r);
     return el('tr', {}, emailCell(r),
       el('td', {}, r.action === 'label' || r.action === 'review' ? labelPicker(r, {confirm: true}) : el('span', {class: 'chip'}, r.action)),
-      el('td', {class: 'hide-sm'}, el('span', {class: 'chip ' + cls}, who),
+      el('td', {class: 'hide-sm'}, attentionPicker(r), ' ', el('span', {class: 'chip ' + cls}, who),
          r.confidence != null && r.decided_by === 'llm' ? el('span', {class: 'when'}, ` ${Math.round(r.confidence * 100)}%`) : null,
          el('div', {class: 'reason'}, r.reason || '')));
   }) : [el('tr', {}, el('td', {colspan: 3, class: 'empty'}, 'No decisions yet.'))]));
@@ -343,9 +404,109 @@ async function loadLabels() {
           try { await api('/api/labels', {name: l.name, description: desc.value}); toast('Saved'); loadLabels(); }
           catch (e) { toast(e.message); }
         }}, 'Save'),
+        el('button', {class: 'btn', onclick: async () => {
+          const target = prompt(`Rename "${l.name}" to (an existing label merges into it):`, l.name);
+          if (!target || target === l.name) return;
+          try { const res = await api('/api/labels/rename', {name: l.name, new_name: target});
+                toast(`Renamed; ${res.moved} emails moved`); LABELS = []; loadLabels(); }
+          catch (e) { toast(e.message); }
+        }}, 'Rename'),
+        el('button', {class: 'btn danger', onclick: async () => {
+          if (!confirm(`Delete "${l.name}"?`)) return;
+          try { await api('/api/labels/delete', {name: l.name}); toast('Deleted'); LABELS = []; loadLabels(); }
+          catch (e) { toast(e.message); }
+        }}, 'Delete'),
         l.source === 'user' && l.builtin ? el('button', {class: 'btn', onclick: () => { desc.value = l.builtin; }}, 'Reset to labels.py') : null));
   }));
 }
+
+// -- attention, labels dialog --------------------------------------------------------
+function attentionPicker(r) {
+  const select = el('select', {class: 'att att-' + (r.attention || 'skip'), title: r.attention_by ? `marked by ${r.attention_by}` : 'not assessed'},
+    r.attention ? null : el('option', {value: '', selected: true}, '—'),
+    ['act', 'read', 'skip'].map(level => el('option', {value: level, selected: r.attention === level}, level)));
+  select.addEventListener('change', async () => {
+    try {
+      await api('/api/attention', {message_id: r.message_id, level: select.value});
+      select.className = 'att att-' + select.value; toast(`Marked ${select.value}`);
+    } catch (e) { toast(e.message); }
+  });
+  return select;
+}
+// Ask for a new label; resolves to its name once created, or null.
+function newLabel(near) {
+  const dialog = $('#new-label');
+  const parents = LABELS.filter(n => !n.includes('/'));
+  const guess = near ? near.split('/')[0] : 'From an organization';
+  $('#nl-parent').replaceChildren(el('option', {value: ''}, '(top level)'),
+    ...parents.map(n => el('option', {value: n, selected: n === guess}, n)));
+  $('#nl-name').value = ''; $('#nl-desc').value = '';
+  dialog.showModal();
+  return new Promise(resolve => {
+    dialog.addEventListener('close', async () => {
+      if (dialog.returnValue !== 'ok') return resolve(null);
+      const leaf = $('#nl-name').value.trim().toLowerCase().replace(/\s+/g, '-');
+      const name = $('#nl-parent').value ? `${$('#nl-parent').value}/${leaf}` : $('#nl-name').value.trim();
+      try {
+        await api('/api/labels/create', {name, description: $('#nl-desc').value});
+        LABELS = []; await ensureLabels(); toast(`Created ${name}`); resolve(name);
+      } catch (e) { toast(e.message); resolve(null); }
+    }, {once: true});
+  });
+}
+$('#label-new').addEventListener('click', async () => {
+  await ensureLabels();
+  if (await newLabel()) loadLabels();
+});
+
+// -- today ------------------------------------------------------------------------
+let SUMMARIES = [];
+function gmailLink(id, text, unread) {
+  return el('a', {href: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(id)}`, target: '_blank',
+                  rel: 'noopener noreferrer', class: unread ? 'unread' : null}, text);
+}
+function renderSummary(sm) {
+  const box = $('#summary');
+  if (!sm) {
+    box.replaceChildren(el('div', {class: 'empty'}, 'No summaries yet. The first arrives at 7 AM or 6 PM, or write one now.'));
+    return;
+  }
+  const items = (list) => list.map(it => el('div', {class: 'item'},
+    el('div', {}, el('span', {class: 't'}, it.title), it.due ? el('span', {class: 'due'}, it.due) : null),
+    el('div', {class: 'reason'}, it.note),
+    el('div', {class: 'links'}, it.emails.map(e => gmailLink(e.id, `${e.sender_email || ''}: ${e.subject || '(no subject)'}`, e.unread)))));
+  const label = {morning: 'Morning briefing', evening: 'Evening recap', manual: 'Summary'}[sm.kind] || sm.kind;
+  box.replaceChildren(
+    el('div', {class: 'when'}, `${label} · ${when(sm.period_start)} – ${when(sm.period_end)}`),
+    el('div', {class: 'headline'}, sm.headline),
+    // replaceChildren() doesn't flatten arrays (el() does): spread the lists.
+    el('h4', {}, `To do (${sm.act.length})`), ...(sm.act.length ? items(sm.act) : [el('div', {class: 'reason'}, 'Nothing.')]),
+    el('h4', {}, `Worth a look (${sm.read.length})`), ...(sm.read.length ? items(sm.read) : [el('div', {class: 'reason'}, 'Nothing.')]),
+    el('div', {class: 'when', style: 'margin-top:10px'},
+       `${sm.counts.act} act · ${sm.counts.read} read in this period · ${sm.counts.still_open} still open from before`));
+}
+async function loadToday() {
+  await ensureLabels();
+  const [summaries, needs] = await Promise.all([api('/api/summaries'), api('/api/needs-you')]);
+  SUMMARIES = summaries;
+  const pick = $('#summary-pick');
+  pick.replaceChildren(...(summaries.length ? summaries.map((sm, i) => el('option', {value: i},
+    `${{morning: 'Morning', evening: 'Evening', manual: 'On demand'}[sm.kind] || sm.kind} · ${when(sm.period_end)}`)) :
+    [el('option', {}, 'No summaries yet')]));
+  renderSummary(summaries[0]);
+  $('#n-act').textContent = needs.filter(r => r.unread).length;
+  $('#needs-rows').replaceChildren(...(needs.length ? needs.map(r => el('tr', {},
+    emailCell(r), el('td', {}, el('span', {class: 'chip'}, short(r.label))), el('td', {}, attentionPicker(r)))) :
+    [el('tr', {}, el('td', {colspan: 3, class: 'empty'}, 'Nothing marked act in the last 3 days.'))]));
+  document.querySelectorAll('#needs-rows .subject a').forEach((a, i) => { if (needs[i].unread) a.classList.add('unread'); });
+}
+$('#summary-pick').addEventListener('change', e => renderSummary(SUMMARIES[+e.target.value]));
+$('#summary-now').addEventListener('click', async (ev) => {
+  const b = ev.target; b.disabled = true; b.textContent = 'Writing…';
+  try { await api('/api/summaries', {}); await loadToday(); toast('Summary written'); }
+  catch (e) { toast(e.message); }
+  finally { b.disabled = false; b.textContent = 'Write one now'; }
+});
 
 // -- senders ------------------------------------------------------------------------
 async function loadSenders() {
@@ -359,9 +520,9 @@ async function loadSenders() {
     [el('tr', {}, el('td', {colspan: 4, class: 'empty'}, 'No known senders yet: it takes 3 matching emails.'))]));
 }
 
-let start = 'overview';
+let start = 'today';
 try { start = localStorage.getItem('tab') || start; } catch (e) {}
-show(loaders[start] ? start : 'overview');
+show(loaders[start] ? start : 'today');
 loadSummary().catch(err => toast(err.message));
 setInterval(() => { if (document.visibilityState === 'visible') loadSummary().catch(() => {}); }, 60000);
 </script>

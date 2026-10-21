@@ -212,10 +212,23 @@ def serve(service, topic: str, audience: str, service_account: str | None = None
     `dashboard_port` also serves the dashboard there (on 127.0.0.1 only, never
     on `port`: that one is exposed publicly through the push tunnel)."""
     account = service.users().getProfile(userId='me').execute()['emailAddress']
+    # Pick up labels.py edits now, not only when the next email is triaged.
+    from gmail_assist.agent.labels import DEFINITIONS
+
+    with Store(db) as store:
+        store.seed_definitions(account, DEFINITIONS)
     if dashboard_port:
         from gmail_assist import dashboard
 
         dashboard.start(account, db, port=dashboard_port)
+    if triage:
+        from gmail_assist.agent.llm import Models
+        from gmail_assist.agent.summary import SummaryScheduler
+
+        if Models.configured('anthropic'):
+            SummaryScheduler(account, db).start()
+        else:
+            log.warning('no ANTHROPIC_API_KEY: daily summaries are off')
     server = None
     worker = SyncWorker(service, account, topic, db, triage=triage, workers=workers,
                         on_fatal=lambda: server and server.shutdown())

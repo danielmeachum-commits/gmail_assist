@@ -19,6 +19,8 @@ Tables:
   - label_proposals: sub-labels a model suggested for mail that only fit a
                    parent label, with the decisions that support each one.
   - settings:      small key/value switches set from the dashboard.
+  - summaries:     the morning briefings and evening recaps shown in the
+                   dashboard.
 """
 import os
 from collections.abc import Iterable
@@ -46,6 +48,9 @@ Kind = Literal['bulk', 'personal']
 Action = Literal['label', 'expire', 'trash', 'archive', 'review', 'none']
 SubscriptionStatus = Literal['active', 'flagged', 'keep', 'unsubscribed']
 ProposalStatus = Literal['pending', 'approved', 'rejected']
+# Whether a message needs you: 'act' (something to do or a deadline), 'read'
+# (worth reading, nothing to do) or 'skip'.
+Attention = Literal['act', 'read', 'skip']
 
 # Defaults for the settings table.
 SETTINGS = {
@@ -122,6 +127,8 @@ class Message(Base):
     processed_at: Mapped[datetime | None]
     result: Mapped[dict[str, Any] | None]  # output of processing
     error: Mapped[str | None] = mapped_column(Text)
+    attention: Mapped[str | None] = mapped_column(String(8))   # see Attention
+    attention_by: Mapped[str | None]          # 'rule:<name>', a model, or 'user'
 
     def body_text(self) -> str | None:
         return parse.body_text(self.payload) if self.has_body and self.payload else None
@@ -161,7 +168,8 @@ class LabelDefinition(Base):
     name: Mapped[str] = mapped_column(primary_key=True)
     description: Mapped[str] = mapped_column(Text)
     # 'builtin' (from labels.py: updated when that changes), 'user' (edited
-    # by you: left alone from then on) or 'proposal' (an approved sub-label).
+    # by you: left alone from then on), 'proposal' (an approved sub-label) or
+    # 'deleted' (renamed or deleted; kept so labels.py can't bring it back).
     source: Mapped[str] = mapped_column(String(16))
     updated_at: Mapped[datetime] = mapped_column(default=_now)
 
@@ -182,6 +190,20 @@ class LabelProposal(Base):
     created_at: Mapped[datetime] = mapped_column(default=_now)
     decided_at: Mapped[datetime | None]
     decided_by: Mapped[str | None]             # 'user' or 'auto'
+
+
+class Summary(Base):
+    __tablename__ = 'summaries'
+    __table_args__ = (Index('summaries_account', 'account', 'created_at'),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account: Mapped[str]
+    kind: Mapped[str] = mapped_column(String(16))   # 'morning', 'evening' or 'manual'
+    period_start: Mapped[datetime]
+    period_end: Mapped[datetime]
+    content: Mapped[dict[str, Any]]           # see agent/summary.py
+    model: Mapped[str | None]
+    created_at: Mapped[datetime] = mapped_column(default=_now)
 
 
 class Setting(Base):
@@ -324,6 +346,10 @@ def _migrate(engine: Engine) -> None:
 
         if 'proposal_id' not in {r[1] for r in conn.exec_driver_sql('PRAGMA table_info(decisions)')}:
             conn.exec_driver_sql('ALTER TABLE decisions ADD COLUMN proposal_id INTEGER')
+        columns = {r[1] for r in conn.exec_driver_sql('PRAGMA table_info(messages)')}
+        if 'attention' not in columns:
+            conn.exec_driver_sql('ALTER TABLE messages ADD COLUMN attention VARCHAR(8)')
+            conn.exec_driver_sql('ALTER TABLE messages ADD COLUMN attention_by VARCHAR')
         # create_all() doesn't add indexes to tables that already exist.
         conn.exec_driver_sql(
             'CREATE INDEX IF NOT EXISTS messages_sender ON messages (account, sender_email)'
@@ -713,11 +739,19 @@ class Store:
             s.execute(stmt)
 
     def definitions(self, account: str) -> list[LabelDefinition]:
+        """Labels in use (not renamed or deleted)."""
         with self.ReadSession() as s:
             return list(s.scalars(
-                select(LabelDefinition).where(LabelDefinition.account == account)
+                select(LabelDefinition)
+                .where(LabelDefinition.account == account, LabelDefinition.source != 'deleted')
                 .order_by(LabelDefinition.name)
             ))
+
+    @staticmethod
+    def _retire(s, account: str, name: str) -> None:
+        s.execute(update(LabelDefinition)
+                  .where(LabelDefinition.account == account, LabelDefinition.name == name)
+                  .values(source='deleted', updated_at=_now()))
 
     def set_definition(self, account: str, name: str, description: str,
                        source: str = 'user') -> None:
@@ -798,6 +832,130 @@ class Store:
                     reason=f'sub-label approved ({by})', proposal_id=p.id,
                 ))
         return len(support)
+
+    def create_label(self, account: str, name: str, description: str) -> None:
+        """A label you defined in the dashboard. A sub-label's parent must exist."""
+        name, description = name.strip(), description.strip()
+        defined = {d.name for d in self.definitions(account)}
+        if not name or not description:
+            raise ValueError('a label needs a name and a definition')
+        if name in defined:
+            raise ValueError(f'{name!r} already exists')
+        if '/' in name and name.rsplit('/', 1)[0] not in defined:
+            raise ValueError(f'parent {name.rsplit("/", 1)[0]!r} does not exist')
+        self.set_definition(account, name, description, source='user')
+
+    def label_counts(self, account: str) -> dict[str, int]:
+        """Messages currently on each label."""
+        latest = self._latest_topic(account)
+        q = (select(Decision.label, func.count())
+             .join(latest, latest.c.id == Decision.id)
+             .where(Decision.action == 'label')
+             .group_by(Decision.label))
+        with self.ReadSession() as s:
+            return {label: n for label, n in s.execute(q)}
+
+    def rename_label(self, account: str, old: str, new: str) -> int:
+        """Rename a label and its sub-labels, moving their messages along.
+        Renaming onto an existing label merges into it (its definition is
+        kept). Returns how many messages moved."""
+        new = new.strip()
+        definitions = {d.name: d for d in self.definitions(account)}
+        if old not in definitions:
+            raise ValueError(f'unknown label {old!r}')
+        if not new or new == old:
+            raise ValueError('give a different name')
+        if new.startswith(old + '/'):
+            raise ValueError("a label can't move under itself")
+        if '/' in new and new.rsplit('/', 1)[0] not in definitions:
+            raise ValueError(f'parent {new.rsplit("/", 1)[0]!r} does not exist')
+        renames = {name: new + name[len(old):] for name in definitions
+                   if name == old or name.startswith(old + '/')}
+        latest = self._latest_topic(account)
+        moved = 0
+        with self.Session.begin() as s:
+            current = s.execute(
+                select(Decision.message_id, Decision.label)
+                .join(latest, latest.c.id == Decision.id)
+                .where(Decision.action == 'label', Decision.label.in_(list(renames)))
+            ).all()
+            for message_id, label in current:
+                s.add(Decision(account=account, message_id=message_id, action='label',
+                               label=renames[label], decided_by='user',
+                               reason=f'label {label!r} renamed', confidence=1.0))
+                moved += 1
+            for name, target in renames.items():
+                d = definitions[name]
+                if target not in definitions:
+                    # merge: the target may be a retired label coming back.
+                    s.merge(LabelDefinition(account=account, name=target, description=d.description,
+                                            source='user', updated_at=_now()))
+                self._retire(s, account, name)
+        return moved
+
+    def delete_label(self, account: str, name: str) -> None:
+        """Remove a label nothing is on and nothing sits under."""
+        defined = {d.name for d in self.definitions(account)}
+        if name not in defined:
+            raise ValueError(f'unknown label {name!r}')
+        if any(other.startswith(name + '/') for other in defined):
+            raise ValueError('it has sub-labels: rename or delete those first')
+        if n := self.label_counts(account).get(name):
+            raise ValueError(f'{n} emails are on it: merge it into another label instead')
+        with self.Session.begin() as s:
+            self._retire(s, account, name)
+
+    # -- attention and summaries ----------------------------------------------
+
+    def set_attention(self, account: str, message_id: str, level: Attention, by: str) -> None:
+        with self.Session.begin() as s:
+            s.execute(update(Message)
+                      .where(Message.account == account, Message.id == message_id)
+                      .values(attention=level, attention_by=by))
+
+    def attention_messages(self, account: str, levels: list[str], since: datetime,
+                           until: datetime | None = None, unread_only: bool = False
+                           ) -> list[tuple[Message, Decision | None]]:
+        """Messages received in [since, until) at these attention levels,
+        newest first, each with its current topic decision."""
+        latest = self._latest_topic(account)
+        current = (select(Decision).join(latest, latest.c.id == Decision.id)).subquery()
+        q = (
+            select(Message, current.c.id)
+            .outerjoin(current, (current.c.account == Message.account)
+                       & (current.c.message_id == Message.id))
+            .where(Message.account == account, Message.attention.in_(levels),
+                   Message.internal_date >= int(since.timestamp() * 1000))
+            .order_by(Message.internal_date.desc())
+        )
+        if until:
+            q = q.where(Message.internal_date < int(until.timestamp() * 1000))
+        if unread_only:
+            q = q.where(Message.unread)
+        with self.ReadSession() as s:
+            rows = s.execute(q).all()
+            decisions = {d.id: d for d in s.scalars(
+                select(Decision).where(Decision.id.in_([i for _, i in rows if i])))}
+            return [(m, decisions.get(i)) for m, i in rows]
+
+    def add_summary(self, account: str, kind: str, period_start: datetime, period_end: datetime,
+                    content: dict[str, Any], model: str | None) -> Summary:
+        # SQLite keeps no zone: store UTC like every other timestamp here.
+        summary = Summary(account=account, kind=kind, period_start=period_start.astimezone(timezone.utc),
+                          period_end=period_end.astimezone(timezone.utc), content=content, model=model)
+        with self.Session.begin() as s:
+            s.add(summary)
+        return summary
+
+    def summaries(self, account: str, limit: int = 30) -> list[Summary]:
+        with self.ReadSession() as s:
+            return list(s.scalars(select(Summary).where(Summary.account == account)
+                                  .order_by(Summary.created_at.desc()).limit(limit)))
+
+    def last_summary(self, account: str, kind: str) -> Summary | None:
+        with self.ReadSession() as s:
+            return s.scalar(select(Summary).where(Summary.account == account, Summary.kind == kind)
+                            .order_by(Summary.period_end.desc()).limit(1))
 
     # -- settings ------------------------------------------------------------
 

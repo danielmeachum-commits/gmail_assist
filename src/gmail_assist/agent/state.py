@@ -63,6 +63,8 @@ class EmailState(TypedDict, total=False):
     # What refine_parent made of a parent-label answer: {'model', 'choice',
     # 'label', 'description', 'reason'}.
     refinement: dict[str, Any] | None
+    # Whether it needs you: {'level': 'act' | 'read' | 'skip', 'by', 'votes'}.
+    attention: dict[str, Any] | None
 
     # -- output -------------------------------------------------------------
     # operator.add makes this a reducer: each node returns only its new
