@@ -54,12 +54,14 @@ def _plan(store: Store, account: str) -> dict[str, tuple[set[str], set[str], lis
 
     plan = {}
     for message_id, decisions in by_message.items():
+        # ME_LABEL is only ever the rule's (mail you sent). An older classifier
+        # could pick it as a topic; such a pick is neither a topic nor yours.
         topic = [d for d in decisions if not (d.action == 'label' and d.label == ME_LABEL)]
         current = topic[-1] if topic else None
         if current is None or current.action != 'label':
             continue
         add = {current.label, PROCESSED_LABEL}
-        if any(d.action == 'label' and d.label == ME_LABEL for d in decisions):
+        if any(d.decided_by == 'rule:me' for d in decisions):
             add.add(ME_LABEL)
         added_before = {d.label for d in topic if d.applied_at and d.action == 'label'}
         remove = added_before - {current.label}
