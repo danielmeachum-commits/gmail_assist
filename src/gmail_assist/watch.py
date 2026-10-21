@@ -11,8 +11,8 @@ The worker also renews the Gmail watch daily (it expires after 7 days) and
 syncs every BACKSTOP_EVERY_S regardless, since Gmail can drop notifications.
 
 With triage on, each sync is followed by a pass of the triage graph over
-pending mail that arrived after serve started (the backlog is left for
-`gmail-assist process`). The backstop also puts failed messages back in the
+pending mail synced since triage was first turned on (Store.triage_since;
+the older backlog is left for `gmail-assist process`). The backstop also puts failed messages back in the
 queue, up to MAX_ATTEMPTS each, so a model server that was down catches up.
 
 Every request must carry the OIDC token Pub/Sub adds when the subscription
@@ -101,8 +101,6 @@ class SyncWorker(threading.Thread):
         self.db = db
         self.triage = triage
         self.workers = workers
-        # Only mail received from now on is triaged automatically.
-        self.since_ms = int(time.time() * 1000)
         self._wake = threading.Event()
 
     def notify(self) -> None:
@@ -157,10 +155,11 @@ class SyncWorker(threading.Thread):
     def _triage(self, store: Store) -> None:
         from gmail_assist.agent.run import process
 
-        while store.pending_count(self.account, self.since_ms):
+        since = store.triage_since(self.account)
+        while store.pending_count(self.account, since):
             try:
                 counts = process(self.service, store, limit=TRIAGE_BATCH,
-                                 workers=self.workers, since_ms=self.since_ms)
+                                 workers=self.workers, synced_since=since)
             except RefreshError:
                 raise
             except Exception:

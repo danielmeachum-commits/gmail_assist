@@ -68,7 +68,7 @@ def setup_logging(verbose: bool) -> None:
     # without -v; the console handler above still filters them.
     logging.getLogger('gmail_assist').setLevel(logging.INFO)
     # Per-request lines from the HTTP clients drown out everything else.
-    for noisy in ('httpx', 'httpcore', 'googleapiclient'):
+    for noisy in ('httpx', 'httpx2', 'httpcore', 'googleapiclient'):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     # The graph trace is already formatted as a readable tree: print it bare.
     trace = logging.getLogger('gmail_assist.agent.trace')

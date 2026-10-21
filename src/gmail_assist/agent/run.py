@@ -12,6 +12,7 @@ import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from typing import Any
 
 import langsmith as ls
@@ -108,11 +109,11 @@ def run_graph(graph, msg: Message, ctx: Context, live: bool = True) -> EmailStat
 
 
 def process(service, store: Store, limit: int = 20, kind: Kind | None = None,
-            workers: int = 4, since_ms: int | None = None) -> dict[str, int]:
+            workers: int = 4, synced_since: datetime | None = None) -> dict[str, int]:
     """`workers` messages run through the graph at once. Match it to the
     local server's parallel slots (llama-server -np N); more workers than
-    slots just queue at the server. `since_ms` only takes mail received at
-    or after that time (serve uses it to skip the backlog)."""
+    slots just queue at the server. `synced_since` only takes messages synced
+    at or after that time (serve uses it to skip the backlog)."""
     # The Gmail client isn't thread-safe: use it here, before any workers.
     account = service.users().getProfile(userId='me').execute()['emailAddress']
     ctx = Context(store=store, account=account, labels=user_labels(service))
@@ -126,7 +127,8 @@ def process(service, store: Store, limit: int = 20, kind: Kind | None = None,
         app_logger.addHandler(log_handler)
     try:
         with ls.tracing_context(enabled=traced, project_name=LANGSMITH_PROJECT):
-            messages = store.claim_batch(limit, account=account, kind=kind, since_ms=since_ms)
+            messages = store.claim_batch(limit, account=account, kind=kind,
+                                         synced_since=synced_since)
             if workers <= 1:
                 outcomes = [_process_one(graph, store, ctx, msg, live=True) for msg in messages]
             else:

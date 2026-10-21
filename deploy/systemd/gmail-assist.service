@@ -13,6 +13,8 @@ ExecStart=/home/hobbes/.local/bin/uv run --frozen gmail-assist -v serve
 Environment=PYTHONUNBUFFERED=1
 Restart=on-failure
 RestartSec=10
+# Python exits 143 on systemd's SIGTERM; that's a clean stop, not a failure.
+SuccessExitStatus=143
 # 78 = Gmail sign-in needed (token missing or revoked). Restarting can't fix
 # that, so stop and show the unit as failed; the journal says what to run.
 RestartPreventExitStatus=78

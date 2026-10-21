@@ -59,6 +59,10 @@ class SyncState(Base):
     account: Mapped[str] = mapped_column(String, primary_key=True)
     history_id: Mapped[str | None]
     last_sync_at: Mapped[datetime | None]
+    # When serve first triaged automatically. Mail synced before this is the
+    # backlog, left for `gmail-assist process`; fixed once set, so restarts
+    # and downtime don't open gaps.
+    triage_since: Mapped[datetime | None]
 
 
 class Message(Base):
@@ -169,17 +173,22 @@ def make_engine(path: Path) -> Engine:
     engine = create_engine(f'sqlite:///{path}')
 
     # pysqlite's own transaction handling defers BEGIN and ignores the lock
-    # mode; take it over (SQLAlchemy's documented recipe) and use IMMEDIATE so
-    # two workers can't claim the same pending rows.
+    # mode; take it over (SQLAlchemy's documented recipe). Writes use
+    # IMMEDIATE so two workers can't claim the same pending rows; reads (the
+    # read_only execution option, see Store.ReadSession) use a plain BEGIN,
+    # which in WAL mode never waits on a writer.
     @event.listens_for(engine, 'connect')
     def _on_connect(dbapi_conn, _record):
         dbapi_conn.isolation_level = None
         dbapi_conn.execute('PRAGMA journal_mode=WAL')
-        dbapi_conn.execute('PRAGMA busy_timeout=5000')
+        # Generous: a WAL checkpoint on slow storage can hold the write lock
+        # for several seconds, and waiting beats failing.
+        dbapi_conn.execute('PRAGMA busy_timeout=30000')
 
     @event.listens_for(engine, 'begin')
     def _on_begin(conn):
-        conn.exec_driver_sql('BEGIN IMMEDIATE')
+        read_only = conn.get_execution_options().get('read_only', False)
+        conn.exec_driver_sql('BEGIN' if read_only else 'BEGIN IMMEDIATE')
 
     return engine
 
@@ -231,6 +240,9 @@ def _migrate(engine: Engine) -> None:
     SQLite can't alter a CHECK constraint, a changed one means rebuilding the
     table and copying its rows across."""
     with engine.begin() as conn:
+        if 'triage_since' not in {r[1] for r in conn.exec_driver_sql('PRAGMA table_info(sync_state)')}:
+            conn.exec_driver_sql('ALTER TABLE sync_state ADD COLUMN triage_since DATETIME')
+
         columns = {row[1] for row in conn.exec_driver_sql('PRAGMA table_info(messages)')}
         if 'read_at' not in columns:
             conn.exec_driver_sql('ALTER TABLE messages ADD COLUMN read_at DATETIME')
@@ -267,7 +279,10 @@ class Store:
         self.engine = make_engine(path)
         Base.metadata.create_all(self.engine)
         _migrate(self.engine)
+        # Session for writes (takes the write lock); ReadSession for lookups.
         self.Session = sessionmaker(self.engine, expire_on_commit=False)
+        self.ReadSession = sessionmaker(self.engine.execution_options(read_only=True),
+                                        expire_on_commit=False)
 
     def close(self) -> None:
         self.engine.dispose()
@@ -281,13 +296,30 @@ class Store:
     # -- sync state ---------------------------------------------------------
 
     def get_history_id(self, account: str) -> str | None:
-        with self.Session() as s:
+        with self.ReadSession() as s:
             state = s.get(SyncState, account)
             return state.history_id if state else None
 
     def set_history_id(self, account: str, history_id: str) -> None:
+        stmt = insert(SyncState).values(account=account, history_id=history_id, last_sync_at=_now())
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[SyncState.account],
+            set_={'history_id': stmt.excluded.history_id, 'last_sync_at': stmt.excluded.last_sync_at},
+        )
         with self.Session.begin() as s:
-            s.merge(SyncState(account=account, history_id=history_id, last_sync_at=_now()))
+            s.execute(stmt)
+
+    def triage_since(self, account: str) -> datetime:
+        """The account's triage cutoff, set to now the first time it's asked for."""
+        stmt = insert(SyncState).values(account=account, triage_since=_now())
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[SyncState.account],
+            set_={'triage_since': func.coalesce(SyncState.triage_since, stmt.excluded.triage_since)},
+        )
+        with self.Session.begin() as s:
+            s.execute(stmt)
+            # SQLite returns it without a zone; it's stored as UTC.
+            return s.get(SyncState, account).triage_since.replace(tzinfo=timezone.utc)
 
     # -- writing synced messages --------------------------------------------
 
@@ -377,7 +409,7 @@ class Store:
 
     def known_ids(self, account: str, ids: Iterable[str]) -> set[str]:
         ids = list(ids)
-        with self.Session() as s:
+        with self.ReadSession() as s:
             return set(s.scalars(
                 select(Message.id).where(Message.account == account, Message.id.in_(ids))
             ))
@@ -385,16 +417,16 @@ class Store:
     # -- batch processing queue ---------------------------------------------
 
     def claim_batch(self, limit: int = 50, account: str | None = None,
-                    kind: Kind | None = None, since_ms: int | None = None) -> list[Message]:
+                    kind: Kind | None = None, synced_since: datetime | None = None) -> list[Message]:
         """Atomically move up to `limit` pending messages to 'processing'.
-        `since_ms` limits it to mail received at or after that time."""
+        `synced_since` limits it to messages synced at or after that time."""
         pending = select(Message.account, Message.id).where(Message.status == 'pending')
         if account:
             pending = pending.where(Message.account == account)
         if kind:
             pending = pending.where(Message.kind == kind)
-        if since_ms is not None:
-            pending = pending.where(Message.internal_date >= since_ms)
+        if synced_since is not None:
+            pending = pending.where(Message.synced_at >= synced_since)
         pending = pending.order_by(Message.internal_date).limit(limit)
 
         with self.Session.begin() as s:
@@ -445,20 +477,20 @@ class Store:
             )
         return res.rowcount
 
-    def pending_count(self, account: str, since_ms: int | None = None) -> int:
+    def pending_count(self, account: str, synced_since: datetime | None = None) -> int:
         q = select(func.count()).where(Message.account == account, Message.status == 'pending')
-        if since_ms is not None:
-            q = q.where(Message.internal_date >= since_ms)
-        with self.Session() as s:
+        if synced_since is not None:
+            q = q.where(Message.synced_at >= synced_since)
+        with self.ReadSession() as s:
             return s.scalar(q)
 
     def counts(self) -> dict[str, int]:
-        with self.Session() as s:
+        with self.ReadSession() as s:
             rows = s.execute(select(Message.status, func.count()).group_by(Message.status))
             return {status: n for status, n in rows}
 
     def get_message(self, account: str, id: str) -> Message | None:
-        with self.Session() as s:
+        with self.ReadSession() as s:
             return s.get(Message, (account, id))
 
     # -- decisions ----------------------------------------------------------
@@ -481,7 +513,7 @@ class Store:
         return decision
 
     def decisions_for(self, account: str, message_id: str) -> list[Decision]:
-        with self.Session() as s:
+        with self.ReadSession() as s:
             return list(s.scalars(
                 select(Decision)
                 .where(Decision.account == account, Decision.message_id == message_id)
@@ -492,7 +524,7 @@ class Store:
         q = select(Decision).where(Decision.applied_at.is_(None), Decision.apply_error.is_(None))
         if account:
             q = q.where(Decision.account == account)
-        with self.Session() as s:
+        with self.ReadSession() as s:
             return list(s.scalars(q.order_by(Decision.created_at)))
 
     def review_queue(self, account: str) -> list[tuple[Decision, Message]]:
@@ -505,7 +537,7 @@ class Store:
                    Decision.applied_at.is_(None), Decision.apply_error.is_(None))
             .order_by(Decision.created_at)
         )
-        with self.Session() as s:
+        with self.ReadSession() as s:
             return [(d, m) for d, m in s.execute(q)]
 
     def mark_decision_applied(self, decision_id: int, error: str | None = None) -> None:
@@ -561,7 +593,7 @@ class Store:
             .group_by(Subscription.account, Subscription.key)
             .order_by(func.count(Message.id).desc())
         )
-        with self.Session() as s:
+        with self.ReadSession() as s:
             return [
                 {
                     'subscription': sub,
@@ -601,5 +633,5 @@ class Store:
         q = select(Subscription).where(Subscription.account == account)
         if status:
             q = q.where(Subscription.status == status)
-        with self.Session() as s:
+        with self.ReadSession() as s:
             return list(s.scalars(q.order_by(Subscription.key)))
