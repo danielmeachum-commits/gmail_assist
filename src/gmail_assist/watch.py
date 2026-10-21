@@ -203,11 +203,19 @@ def make_handler(path: str, verifier: PushVerifier, on_notify) -> type[BaseHTTPR
 
 def serve(service, topic: str, audience: str, service_account: str | None = None, *,
           host: str = '127.0.0.1', port: int = 8080, path: str = '/gmail/push',
-          db: Path | str | None = None, triage: bool = True, workers: int = 4) -> None:
+          db: Path | str | None = None, triage: bool = True, workers: int = 4,
+          dashboard_port: int | None = None) -> None:
     """Runs until interrupted. If the sync worker stops (e.g. the Gmail token
     was revoked), shuts the server down and raises its error, so a service
-    manager sees the failure instead of a server that silently stopped syncing."""
+    manager sees the failure instead of a server that silently stopped syncing.
+
+    `dashboard_port` also serves the dashboard there (on 127.0.0.1 only, never
+    on `port`: that one is exposed publicly through the push tunnel)."""
     account = service.users().getProfile(userId='me').execute()['emailAddress']
+    if dashboard_port:
+        from gmail_assist import dashboard
+
+        dashboard.start(account, db, port=dashboard_port)
     server = None
     worker = SyncWorker(service, account, topic, db, triage=triage, workers=workers,
                         on_fatal=lambda: server and server.shutdown())

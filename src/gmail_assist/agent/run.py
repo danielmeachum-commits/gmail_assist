@@ -19,6 +19,7 @@ import langsmith as ls
 from langchain_core.tracers.langchain import wait_for_all_tracers
 
 from gmail_assist.agent.graph import build_graph
+from gmail_assist.agent.labels import DEFINITIONS
 from gmail_assist.agent.tracing import LangSmithLogHandler
 from gmail_assist.agent.state import Context, EmailState, initial_state
 from gmail_assist.store import Kind, Message, Store
@@ -27,7 +28,12 @@ log = logging.getLogger(__name__)
 # Per-node progress, shown with `gmail-assist -v process`.
 trace = logging.getLogger('gmail_assist.agent.trace')
 
-# The longest legitimate path is about 7 steps (with one escalation). A
+# A proposed sub-label is approved automatically (when the label_creation
+# setting is 'auto') once this many messages from this many senders support it.
+PROPOSAL_MIN_MESSAGES = 3
+PROPOSAL_MIN_SENDERS = 2
+
+# The longest legitimate path is about 8 steps (with one escalation). A
 # tight limit means a routing bug that loops classify -> escalate fails the
 # message after a few model calls instead of LangGraph's default 25 steps.
 RECURSION_LIMIT = 12
@@ -43,6 +49,25 @@ def tracing_enabled() -> bool:
 def user_labels(service) -> list[str]:
     labels = service.users().labels().list(userId='me').execute().get('labels', [])
     return sorted(l['name'] for l in labels if l['type'] == 'user')
+
+
+def load_definitions(store: Store, account: str, gmail_labels: list[str]) -> dict[str, str]:
+    """The labels models may choose (see Context.definitions), after adding
+    any new or changed definitions from labels.py to the store."""
+    store.seed_definitions(account, DEFINITIONS)
+    gmail = set(gmail_labels)
+    return {d.name: d.description for d in store.definitions(account)
+            if d.name in gmail or d.source == 'proposal'}
+
+
+def approve_ready_proposals(store: Store, account: str) -> None:
+    """With label_creation 'auto', approve proposals with enough support."""
+    if store.get_setting(account, 'label_creation') != 'auto':
+        return
+    for p in store.proposals(account, status='pending'):
+        if p['messages'] >= PROPOSAL_MIN_MESSAGES and p['senders'] >= PROPOSAL_MIN_SENDERS:
+            n = store.decide_proposal(account, p['proposal'].id, 'approved', by='auto')
+            log.info('approved sub-label %r; relabelled %d messages', p['proposal'].name, n)
 
 
 def _summarize(update: dict[str, Any]) -> str:
@@ -116,7 +141,8 @@ def process(service, store: Store, limit: int = 20, kind: Kind | None = None,
     at or after that time (serve uses it to skip the backlog)."""
     # The Gmail client isn't thread-safe: use it here, before any workers.
     account = service.users().getProfile(userId='me').execute()['emailAddress']
-    ctx = Context(store=store, account=account, labels=user_labels(service))
+    ctx = Context(store=store, account=account,
+                  definitions=load_definitions(store, account, user_labels(service)))
     graph = build_graph()
 
     traced = tracing_enabled()
@@ -157,6 +183,8 @@ def _process_one(graph, store: Store, ctx: Context, msg: Message, live: bool) ->
         out = run_graph(graph, msg, ctx, live=live)
         for d in out['decisions']:
             store.record_decision(account, msg.id, **d)
+        if any(d.get('proposal') for d in out['decisions']):
+            approve_ready_proposals(store, account)
         if flag := out.get('subscription_flag'):
             store.set_subscription_status(
                 account, msg.subscription_key, flag['status'],
@@ -164,6 +192,7 @@ def _process_one(graph, store: Store, ctx: Context, msg: Message, live: bool) ->
             )
         store.mark_done(account, msg.id, result={
             'decisions': out['decisions'], 'attempts': out.get('attempts', []),
+            'refinement': out.get('refinement'),
         })
         return 'done'
     except Exception as err:

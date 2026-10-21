@@ -13,6 +13,12 @@ Tables:
   - subscriptions: one row per mailing list (List-Id, else sender address) with
                    its List-Unsubscribe targets and a status used to flag lists
                    for unsubscribing.
+  - label_definitions: what each label means, as the models are told. Seeded
+                   from agent/labels.py; edited from the dashboard, and added
+                   to when a proposed sub-label is approved.
+  - label_proposals: sub-labels a model suggested for mail that only fit a
+                   parent label, with the decisions that support each one.
+  - settings:      small key/value switches set from the dashboard.
 """
 import os
 from collections.abc import Iterable
@@ -39,6 +45,14 @@ Kind = Literal['bulk', 'personal']
 # 'none':   looked at, deliberately left alone
 Action = Literal['label', 'expire', 'trash', 'archive', 'review', 'none']
 SubscriptionStatus = Literal['active', 'flagged', 'keep', 'unsubscribed']
+ProposalStatus = Literal['pending', 'approved', 'rejected']
+
+# Defaults for the settings table.
+SETTINGS = {
+    # 'manual': proposed sub-labels wait for you in the dashboard.
+    # 'auto': one is approved as soon as it has enough supporting mail.
+    'label_creation': 'manual',
+}
 
 
 def _now() -> datetime:
@@ -74,6 +88,7 @@ class Message(Base):
         Index('messages_status', 'status', 'internal_date'),
         Index('messages_thread', 'account', 'thread_id'),
         Index('messages_subscription', 'account', 'subscription_key', 'internal_date'),
+        Index('messages_sender', 'account', 'sender_email'),
     )
 
     account: Mapped[str] = mapped_column(primary_key=True)
@@ -135,6 +150,46 @@ class Decision(Base):
     created_at: Mapped[datetime] = mapped_column(default=_now)
     applied_at: Mapped[datetime | None]
     apply_error: Mapped[str | None] = mapped_column(Text)
+    # The proposed sub-label this message would go under (see LabelProposal).
+    proposal_id: Mapped[int | None]
+
+
+class LabelDefinition(Base):
+    __tablename__ = 'label_definitions'
+
+    account: Mapped[str] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(primary_key=True)
+    description: Mapped[str] = mapped_column(Text)
+    # 'builtin' (from labels.py: updated when that changes), 'user' (edited
+    # by you: left alone from then on) or 'proposal' (an approved sub-label).
+    source: Mapped[str] = mapped_column(String(16))
+    updated_at: Mapped[datetime] = mapped_column(default=_now)
+
+
+class LabelProposal(Base):
+    __tablename__ = 'label_proposals'
+    __table_args__ = (
+        CheckConstraint("status IN ('pending', 'approved', 'rejected')", name='status_valid'),
+        Index('label_proposals_name', 'account', 'name', unique=True),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account: Mapped[str]
+    name: Mapped[str]                          # 'Parent/child'
+    description: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), default='pending')
+    proposed_by: Mapped[str | None]            # model
+    created_at: Mapped[datetime] = mapped_column(default=_now)
+    decided_at: Mapped[datetime | None]
+    decided_by: Mapped[str | None]             # 'user' or 'auto'
+
+
+class Setting(Base):
+    __tablename__ = 'settings'
+
+    account: Mapped[str] = mapped_column(primary_key=True)
+    key: Mapped[str] = mapped_column(primary_key=True)
+    value: Mapped[str] = mapped_column(Text)
 
 
 class Subscription(Base):
@@ -263,8 +318,16 @@ def _migrate(engine: Engine) -> None:
             for index in Decision.__table__.indexes:
                 conn.exec_driver_sql(f'DROP INDEX IF EXISTS {index.name}')
             Decision.__table__.create(conn)
-            conn.exec_driver_sql('INSERT INTO decisions SELECT * FROM decisions_old')
+            old = ', '.join(r[1] for r in conn.exec_driver_sql('PRAGMA table_info(decisions_old)'))
+            conn.exec_driver_sql(f'INSERT INTO decisions ({old}) SELECT {old} FROM decisions_old')
             conn.exec_driver_sql('DROP TABLE decisions_old')
+
+        if 'proposal_id' not in {r[1] for r in conn.exec_driver_sql('PRAGMA table_info(decisions)')}:
+            conn.exec_driver_sql('ALTER TABLE decisions ADD COLUMN proposal_id INTEGER')
+        # create_all() doesn't add indexes to tables that already exist.
+        conn.exec_driver_sql(
+            'CREATE INDEX IF NOT EXISTS messages_sender ON messages (account, sender_email)'
+        )
 
 
 class Store:
@@ -498,9 +561,14 @@ class Store:
     def record_decision(self, account: str, message_id: str, action: Action, *,
                         decided_by: str, label: str | None = None, new_label: bool = False,
                         reason: str | None = None, model: str | None = None,
-                        confidence: float | None = None) -> Decision:
+                        confidence: float | None = None, proposal: str | None = None,
+                        proposal_description: str | None = None,
+                        proposed_by: str | None = None) -> Decision:
         """Append a decision. Nothing touches Gmail here; the applier reads
-        unapplied decisions later (and a dry run just never applies them)."""
+        unapplied decisions later (and a dry run just never applies them).
+
+        `proposal` names a sub-label this message supports (it's labelled
+        with the parent meanwhile); the proposal is created if it's new."""
         if action == 'label' and not label:
             raise ValueError("action='label' needs a label")
         decision = Decision(
@@ -509,8 +577,240 @@ class Store:
             confidence=confidence,
         )
         with self.Session.begin() as s:
+            if proposal:
+                s.execute(insert(LabelProposal).values(
+                    account=account, name=proposal, description=proposal_description or '',
+                    status='pending', proposed_by=proposed_by or model, created_at=_now(),
+                ).on_conflict_do_nothing())
+                decision.proposal_id = s.scalar(select(LabelProposal.id).where(
+                    LabelProposal.account == account, LabelProposal.name == proposal))
             s.add(decision)
         return decision
+
+    @staticmethod
+    def _topic(q):
+        """Only decisions that say what a message is about: not the rule-added
+        Me tag."""
+        from gmail_assist.agent.labels import ME_LABEL
+
+        return q.where(~((Decision.action == 'label') & (Decision.label == ME_LABEL)))
+
+    def _latest_topic(self, account: str):
+        """Subquery: the id of each message's latest topic decision. Later
+        decisions (your corrections, an approved sub-label) replace earlier ones."""
+        return self._topic(
+            select(func.max(Decision.id).label('id')).where(Decision.account == account)
+        ).group_by(Decision.message_id).subquery()
+
+    def sender_history(self, account: str, sender_email: str, limit: int = 20) -> list[Decision]:
+        """The latest topic decision for each of this sender's recent
+        messages, newest first. Labels copied from a thread or from sender
+        history itself are left out, so history only counts independent
+        judgements (a model's, yours, or an approved sub-label)."""
+        latest = self._latest_topic(account)
+        q = (
+            select(Decision)
+            .join(latest, latest.c.id == Decision.id)
+            .join(Message, (Message.account == Decision.account) & (Message.id == Decision.message_id))
+            .where(Message.sender_email == sender_email,
+                   Decision.decided_by.not_in(['thread', 'sender']))
+            .order_by(Decision.id.desc())
+            .limit(limit)
+        )
+        with self.ReadSession() as s:
+            return list(s.scalars(q))
+
+    def sender_histories(self, account: str) -> dict[str, dict[str, Any]]:
+        """sender_history() for every sender at once, as {sender_email:
+        {'kind', 'history': [Decision, ...] newest first, 'shortcuts': n}},
+        where shortcuts counts messages labelled from that history."""
+        latest = self._latest_topic(account)
+        q = (
+            select(Decision, Message.sender_email, Message.kind)
+            .join(latest, latest.c.id == Decision.id)
+            .join(Message, (Message.account == Decision.account) & (Message.id == Decision.message_id))
+            .where(Message.sender_email.isnot(None))
+            .order_by(Decision.id.desc())
+        )
+        senders: dict[str, dict[str, Any]] = {}
+        with self.ReadSession() as s:
+            for d, sender, kind in s.execute(q):
+                entry = senders.setdefault(sender, {'kind': kind, 'history': [], 'shortcuts': 0})
+                if d.decided_by == 'sender':
+                    entry['shortcuts'] += 1
+                elif d.decided_by != 'thread':
+                    entry['history'].append(d)
+        return senders
+
+    def recent_on_label(self, account: str, label: str, limit: int = 15,
+                        exclude_id: str | None = None) -> list[Message]:
+        """Messages whose current topic label is `label`, newest first."""
+        latest = self._latest_topic(account)
+        q = (
+            select(Message)
+            .join(Decision, (Message.account == Decision.account) & (Message.id == Decision.message_id))
+            .join(latest, latest.c.id == Decision.id)
+            .where(Decision.action == 'label', Decision.label == label)
+            .order_by(Message.internal_date.desc())
+            .limit(limit)
+        )
+        if exclude_id:
+            q = q.where(Message.id != exclude_id)
+        with self.ReadSession() as s:
+            return list(s.scalars(q))
+
+    def recent_decisions(self, account: str, limit: int = 100, action: Action | None = None,
+                         decided_by: str | None = None) -> list[tuple[Decision, Message]]:
+        """Each message's current topic decision, newest message first."""
+        latest = self._latest_topic(account)
+        q = (
+            select(Decision, Message)
+            .join(latest, latest.c.id == Decision.id)
+            .join(Message, (Message.account == Decision.account) & (Message.id == Decision.message_id))
+            .order_by(Message.internal_date.desc())
+            .limit(limit)
+        )
+        if action:
+            q = q.where(Decision.action == action)
+        if decided_by:
+            q = q.where(Decision.decided_by == decided_by)
+        with self.ReadSession() as s:
+            return [(d, m) for d, m in s.execute(q)]
+
+    def decision_counts(self, account: str, since: datetime) -> dict[str, int]:
+        """Topic decisions made since `since`, by who made them: 'local' or
+        'claude' for a model, else decided_by ('rule:...', 'thread', 'sender',
+        'user', 'proposal'), plus 'review' for those left to you."""
+        who = case(
+            (Decision.action == 'review', 'review'),
+            (Decision.decided_by != 'llm', Decision.decided_by),
+            (Decision.model.like('local:%'), 'local'),
+            else_='claude',
+        )
+        q = self._topic(
+            select(who, func.count()).where(Decision.account == account, Decision.created_at >= since)
+        ).group_by(who)
+        with self.ReadSession() as s:
+            return {k: n for k, n in s.execute(q)}
+
+    # -- label definitions and proposals --------------------------------------
+
+    def seed_definitions(self, account: str, definitions: dict[str, str]) -> None:
+        """Add labels.py's definitions, and update ones still as labels.py
+        wrote them; a definition you edited in the dashboard is kept."""
+        stmt = insert(LabelDefinition).values([
+            {'account': account, 'name': name, 'description': desc, 'source': 'builtin',
+             'updated_at': _now()}
+            for name, desc in definitions.items()
+        ])
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[LabelDefinition.account, LabelDefinition.name],
+            set_={'description': stmt.excluded.description, 'updated_at': stmt.excluded.updated_at},
+            where=(LabelDefinition.source == 'builtin')
+                  & (LabelDefinition.description != stmt.excluded.description),
+        )
+        with self.Session.begin() as s:
+            s.execute(stmt)
+
+    def definitions(self, account: str) -> list[LabelDefinition]:
+        with self.ReadSession() as s:
+            return list(s.scalars(
+                select(LabelDefinition).where(LabelDefinition.account == account)
+                .order_by(LabelDefinition.name)
+            ))
+
+    def set_definition(self, account: str, name: str, description: str,
+                       source: str = 'user') -> None:
+        stmt = insert(LabelDefinition).values(
+            account=account, name=name, description=description, source=source, updated_at=_now())
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[LabelDefinition.account, LabelDefinition.name],
+            set_={'description': stmt.excluded.description, 'source': stmt.excluded.source,
+                  'updated_at': stmt.excluded.updated_at},
+        )
+        with self.Session.begin() as s:
+            s.execute(stmt)
+
+    def proposals(self, account: str, status: ProposalStatus | None = None) -> list[dict[str, Any]]:
+        """Proposals with their support: messages that would move there (whose
+        current label is still the proposal's parent) and distinct senders."""
+        latest = self._latest_topic(account)
+        support = (
+            select(Decision.proposal_id,
+                   func.count(Decision.id).label('messages'),
+                   func.count(func.distinct(Message.sender_email)).label('senders'))
+            .join(latest, latest.c.id == Decision.id)
+            .join(Message, (Message.account == Decision.account) & (Message.id == Decision.message_id))
+            .where(Decision.proposal_id.isnot(None))
+            .group_by(Decision.proposal_id)
+            .subquery()
+        )
+        q = (
+            select(LabelProposal, support.c.messages, support.c.senders)
+            .outerjoin(support, support.c.proposal_id == LabelProposal.id)
+            .where(LabelProposal.account == account)
+            .order_by(LabelProposal.created_at.desc())
+        )
+        if status:
+            q = q.where(LabelProposal.status == status)
+        with self.ReadSession() as s:
+            return [{'proposal': p, 'messages': n or 0, 'senders': k or 0} for p, n, k in s.execute(q)]
+
+    def proposal_messages(self, account: str, proposal_id: int) -> list[Message]:
+        """The messages currently supporting a proposal, newest first."""
+        latest = self._latest_topic(account)
+        q = (
+            select(Message)
+            .join(Decision, (Message.account == Decision.account) & (Message.id == Decision.message_id))
+            .join(latest, latest.c.id == Decision.id)
+            .where(Decision.proposal_id == proposal_id)
+            .order_by(Message.internal_date.desc())
+        )
+        with self.ReadSession() as s:
+            return list(s.scalars(q))
+
+    def decide_proposal(self, account: str, proposal_id: int, status: ProposalStatus, *,
+                        by: str, name: str | None = None, description: str | None = None) -> int:
+        """Approve or reject a proposal, optionally renaming it or rewording
+        its definition first. Approving adds the definition and relabels the
+        messages that supported it (the applier creates the Gmail label).
+        Returns how many messages were relabelled."""
+        support = self.proposal_messages(account, proposal_id)
+        with self.Session.begin() as s:
+            p = s.get(LabelProposal, proposal_id)
+            if p is None or p.account != account:
+                raise KeyError(f'no proposal {proposal_id}')
+            if name and name != p.name:
+                if name.rsplit('/', 1)[0] != p.name.rsplit('/', 1)[0]:
+                    raise ValueError(f'{name!r} must stay under {p.name.rsplit("/", 1)[0]!r}')
+                p.name = name
+            if description:
+                p.description = description
+            p.status, p.decided_at, p.decided_by = status, _now(), by
+            if status != 'approved':
+                return 0
+            s.merge(LabelDefinition(account=account, name=p.name, description=p.description,
+                                    source='proposal', updated_at=_now()))
+            for msg in support:
+                s.add(Decision(
+                    account=account, message_id=msg.id, action='label', label=p.name,
+                    new_label=True, decided_by='proposal', model=p.proposed_by,
+                    reason=f'sub-label approved ({by})', proposal_id=p.id,
+                ))
+        return len(support)
+
+    # -- settings ------------------------------------------------------------
+
+    def get_setting(self, account: str, key: str) -> str:
+        with self.ReadSession() as s:
+            row = s.get(Setting, (account, key))
+            return row.value if row else SETTINGS[key]
+
+    def set_setting(self, account: str, key: str, value: str) -> None:
+        if key not in SETTINGS:
+            raise KeyError(f'unknown setting {key!r}')
+        with self.Session.begin() as s:
+            s.merge(Setting(account=account, key=key, value=value))
 
     def thread_label(self, account: str, thread_id: str, exclude_id: str | None = None) -> Decision | None:
         """The topic label already decided for another message in this

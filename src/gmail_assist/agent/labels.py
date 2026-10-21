@@ -1,7 +1,15 @@
 """What each Gmail label means: the one place the prompt, the rules and the
-evaluation all read from. Edit DEFINITIONS to change how mail is sorted.
+evaluation all read from.
 
-Labels that exist in Gmail but aren't here are never offered to a model.
+DEFINITIONS seeds the store's label_definitions table, which is what the
+models actually see: editing one here updates the store, unless you've since
+edited it in the dashboard. Sub-labels approved from proposals are added
+there too. Labels in Gmail without a definition are never offered to a model.
+
+Writing a definition: say what belongs, in general terms ("bank and card
+alerts"), not who sends it. Name an organization or person only when the
+model couldn't work it out from the email itself -- a private group, or an acronym it may not know. Specific well-known senders belong in
+the examples (examples.json) or are learned from sender history.
 """
 import json
 import re
@@ -37,7 +45,7 @@ DEFINITIONS: dict[str, str] = {
         'from people. Never automated mail.',
     'From an organization':
         'Automated or organizational mail that fits none of the sub-labels: service '
-        'notices, account settings, family-app notices (e.g. Google Family Link).',
+        'notices, account settings, parental-control and family-app notices.',
     'From an organization/account-alerts':
         'Alerts about your accounts that need no payment: bank and card transaction '
         'or fraud alerts, utility usage alerts, insurance policy documents.',
@@ -50,7 +58,7 @@ DEFINITIONS: dict[str, str] = {
         'Job postings, recruiters, job applications and hiring.',
     'From an organization/community':
         'Volunteer groups, clubs, HOA, nonprofits and civic groups you are involved '
-        'with, including their newsletters.',
+        'with, including their newsletters. Not churches (religious) or schools (school).',
     'From an organization/military':
         'Military and veteran organizations and services.',
     'From an organization/one-time-code':
@@ -99,11 +107,17 @@ def automated(kind: str, sender_email: str | None) -> bool:
     return kind == 'bulk' or bool(NO_REPLY.search(sender_email or ''))
 
 
-def choices(gmail_labels: list[str], automated: bool = False) -> list[str]:
-    """The labels a model may pick for one message: defined, present in
-    Gmail, and not rule-only. Automated mail can't be from a person."""
-    available = set(gmail_labels)
-    return [
-        label for label in DEFINITIONS
-        if label in available and not (automated and label.startswith('From a person'))
-    ]
+def choices(definitions: dict[str, str], automated: bool = False) -> list[str]:
+    """The labels a model may pick for one message, from the definitions in
+    use (see Context.definitions). Automated mail can't be from a person."""
+    return [label for label in definitions
+            if not (automated and label.startswith('From a person'))]
+
+
+def parent(label: str) -> str | None:
+    return label.rsplit('/', 1)[0] if '/' in label else None
+
+
+def is_parent(label: str, definitions: dict[str, str]) -> bool:
+    """Whether other labels sit under this one, so a sub-label could fit better."""
+    return any(parent(other) == label for other in definitions)

@@ -27,7 +27,6 @@ CLAUDE_MAX_TOKENS = 8000
 class Classification(BaseModel):
     # TODO: tune these descriptions -- the model reads them as instructions.
     label: str = Field(description='The Gmail label this email belongs under, e.g. "Finance/Receipts".')
-    is_new_label: bool = Field(description='True if no existing label fits and this is a new sub-label.')
     confidence: float = Field(ge=0, le=1, description='How sure you are, from 0 to 1.')
     reason: str = Field(description='One short sentence explaining the choice.')
 

@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mail Triage</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #667085; --line: #e4e7ec;
+  --accent: #2f6fde; --accent-soft: #e8f0fd; --good: #1f8a4c; --good-soft: #e5f5ec;
+  --warn: #b25e09; --warn-soft: #fdf0e1; --bad: #c4321f; --bad-soft: #fbe9e7;
+  --chip: #eef0f4; --shadow: 0 1px 2px rgba(16,24,40,.06);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12151b; --panel: #1a1e26; --text: #e6e9ef; --muted: #98a1b2; --line: #2a303b;
+    --accent: #6d9cf0; --accent-soft: #1f2b40; --good: #4cc282; --good-soft: #17301f;
+    --warn: #e7a453; --warn-soft: #33261a; --bad: #ef7a69; --bad-soft: #3a1f1c;
+    --chip: #252b36; --shadow: none;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+header { position: sticky; top: 0; z-index: 2; background: var(--panel); border-bottom: 1px solid var(--line); }
+.bar { max-width: 1200px; margin: 0 auto; padding: 12px 16px 0; }
+h1 { font-size: 16px; margin: 0 0 2px; }
+.sub { color: var(--muted); font-size: 12px; }
+nav { display: flex; gap: 4px; overflow-x: auto; margin-top: 10px; }
+nav button { border: 0; background: none; color: var(--muted); padding: 8px 12px; font: inherit;
+  border-bottom: 2px solid transparent; cursor: pointer; white-space: nowrap; }
+nav button.on { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+.count { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 4px; border-radius: 9px;
+  background: var(--accent-soft); color: var(--accent); font-size: 11px; font-weight: 600; text-align: center; }
+main { max-width: 1200px; margin: 0 auto; padding: 16px; }
+section { display: none; } section.on { display: block; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin-bottom: 18px; }
+.tile { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; box-shadow: var(--shadow); }
+.tile .n { font-size: 24px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.tile .l { color: var(--muted); font-size: 12px; }
+h2 { font-size: 14px; margin: 18px 0 8px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; }
+tr:last-child td { border-bottom: 0; }
+.subject { font-weight: 500; overflow-wrap: anywhere; }
+.subject a { color: inherit; text-decoration: none; } .subject a:hover { text-decoration: underline; }
+.from, .reason, .when { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.chip { display: inline-block; padding: 1px 8px; border-radius: 10px; background: var(--chip); font-size: 12px; white-space: nowrap; }
+.by-local { background: var(--accent-soft); color: var(--accent); }
+.by-claude { background: #efe7fb; color: #6b3fc4; }
+@media (prefers-color-scheme: dark) { .by-claude { background: #2a2140; color: #b79af0; } }
+.by-sender, .by-thread { background: var(--good-soft); color: var(--good); }
+.by-user { background: var(--warn-soft); color: var(--warn); }
+.by-review { background: var(--bad-soft); color: var(--bad); }
+select, input[type=text], textarea { font: inherit; color: var(--text); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 6px; padding: 5px 7px; max-width: 100%; }
+textarea { width: 100%; min-height: 56px; resize: vertical; }
+button.btn { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--text);
+  border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+button.btn:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.danger { color: var(--bad); }
+.actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.filters button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.cards { display: grid; gap: 12px; }
+.card { padding: 14px; }
+.card h3 { margin: 0 0 6px; font-size: 14px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.card ul { margin: 8px 0; padding-left: 18px; color: var(--muted); font-size: 12px; }
+.field { margin: 8px 0; } .field label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 3px; }
+.field input[type=text] { width: 100%; }
+.toggle { display: flex; gap: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; width: fit-content; }
+.toggle button { border: 0; background: var(--panel); color: var(--muted); padding: 6px 14px; font: inherit; cursor: pointer; }
+.toggle button.on { background: var(--accent); color: #fff; }
+.note { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+.empty { color: var(--muted); padding: 24px; text-align: center; }
+.status-pending { background: var(--warn-soft); color: var(--warn); }
+.status-approved { background: var(--good-soft); color: var(--good); }
+.status-rejected { background: var(--chip); color: var(--muted); }
+#toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg);
+  padding: 8px 14px; border-radius: 8px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+#toast.on { opacity: 1; }
+.edited { color: var(--warn); font-size: 11px; }
+@media (max-width: 720px) {
+  .hide-sm { display: none; }
+  th, td { padding: 8px 6px; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <h1>Mail triage</h1>
+    <div class="sub" id="account">loading…</div>
+    <nav id="tabs">
+      <button data-tab="overview" class="on">Overview</button>
+      <button data-tab="review">Review <span class="count" id="n-review">0</span></button>
+      <button data-tab="recent">Recent</button>
+      <button data-tab="proposals">Proposed labels <span class="count" id="n-proposals">0</span></button>
+      <button data-tab="labels">Definitions</button>
+      <button data-tab="senders">Known senders</button>
+    </nav>
+  </div>
+</header>
+<main>
+  <section id="overview" class="on">
+    <h2>Last 24 hours</h2><div class="tiles" id="tiles-day"></div>
+    <h2>Last 7 days</h2><div class="tiles" id="tiles-week"></div>
+    <h2>Queue</h2><div class="tiles" id="tiles-queue"></div>
+  </section>
+
+  <section id="review">
+    <p class="note">The models weren't sure about these. Pick a label (the best guess is preselected) and save, or leave them.</p>
+    <div class="panel"><table><thead><tr><th>Email</th><th>Label</th><th class="hide-sm">Why</th></tr></thead>
+      <tbody id="review-rows"></tbody></table></div>
+  </section>
+
+  <section id="recent">
+    <div class="filters" id="recent-filters">
+      <button class="btn on" data-view="all">All</button>
+      <button class="btn" data-view="claude">Claude</button>
+      <button class="btn" data-view="sender">Known sender</button>
+      <button class="btn" data-view="thread">Thread</button>
+      <button class="btn" data-view="proposal">New sub-label</button>
+      <button class="btn" data-view="user">Your corrections</button>
+    </div>
+    <p class="note">Change a label to correct it, or ✓ to confirm it. Both count toward sender history.</p>
+    <div class="panel"><table><thead><tr><th>Email</th><th>Label</th><th class="hide-sm">Decided by</th></tr></thead>
+      <tbody id="recent-rows"></tbody></table></div>
+  </section>
+
+  <section id="proposals">
+    <div class="panel card">
+      <h3>New sub-labels</h3>
+      <div class="toggle" id="creation">
+        <button data-value="manual">Ask me</button><button data-value="auto">Automatic</button>
+      </div>
+      <p class="note" id="creation-note"></p>
+    </div>
+    <div class="cards" id="proposal-cards" style="margin-top:12px"></div>
+  </section>
+
+  <section id="labels">
+    <p class="note">What each label means, exactly as the models are told. Editing one here overrides labels.py for that label.</p>
+    <div class="cards" id="label-cards" style="margin-top:12px"></div>
+  </section>
+
+  <section id="senders">
+    <p class="note">Automated senders whose recent emails all got the same label. Their mail is labelled without a model, except a 1-in-20 spot check. Correct one email in Recent to break a streak.</p>
+    <div class="panel"><table><thead><tr><th>Sender</th><th>Label</th><th>Streak</th><th>Labelled from history</th></tr></thead>
+      <tbody id="sender-rows"></tbody></table></div>
+  </section>
+</main>
+<div id="toast"></div>
+
+<script>
+'use strict';
+// Everything shown comes from email (subjects, senders): build DOM nodes and
+// set textContent, never innerHTML with data.
+const $ = (sel) => document.querySelector(sel);
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'class') node.className = v;
+    else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
+    else if (v !== null && v !== undefined && v !== false) node.setAttribute(k, v === true ? '' : v);
+  }
+  for (const c of children.flat()) if (c !== null && c !== undefined) node.append(c instanceof Node ? c : String(c));
+  return node;
+}
+async function api(path, body) {
+  const opts = body === undefined ? {} : {
+    method: 'POST', headers: {'Content-Type': 'application/json', 'X-Gmail-Assist': '1'}, body: JSON.stringify(body)};
+  const res = await fetch(path, opts);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+function toast(text) {
+  const t = $('#toast'); t.textContent = text; t.classList.add('on');
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => t.classList.remove('on'), 2200);
+}
+const when = (iso) => iso ? new Date(iso).toLocaleString([], {month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'}) : '';
+const short = (label) => label ? label.replace(/^From an organization\//, '').replace(/^From a person\//, 'person/') : '—';
+function byClass(r) {
+  if (r.action === 'review') return ['review', 'by-review'];
+  if (r.decided_by === 'llm') return (r.model || '').startsWith('local:') ? ['Gemma', 'by-local'] : ['Claude', 'by-claude'];
+  const names = {sender: 'known sender', thread: 'thread', user: 'you', proposal: 'new sub-label'};
+  return [names[r.decided_by] || r.decided_by, 'by-' + r.decided_by];
+}
+let LABELS = [];
+
+// -- tabs ---------------------------------------------------------------------
+const loaders = {overview: loadSummary, review: loadReview, recent: loadRecent,
+                 proposals: loadProposals, labels: loadLabels, senders: loadSenders};
+function show(tab) {
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
+  document.querySelectorAll('main section').forEach(s => s.classList.toggle('on', s.id === tab));
+  try { localStorage.setItem('tab', tab); } catch (e) {}
+  loaders[tab]().catch(err => toast(err.message));
+}
+$('#tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (b) show(b.dataset.tab); });
+
+// -- overview -----------------------------------------------------------------
+function tiles(target, entries) {
+  target.replaceChildren(...entries.map(([label, n]) =>
+    el('div', {class: 'tile'}, el('div', {class: 'n'}, n ?? 0), el('div', {class: 'l'}, label))));
+}
+function byWho(counts) {
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  const rules = Object.entries(counts).filter(([k]) => k.startsWith('rule:')).reduce((a, [, n]) => a + n, 0);
+  const model = (counts.local || 0) + (counts.claude || 0);
+  return [['emails decided', total], ['by Gemma', counts.local], ['by Claude', counts.claude],
+          ['known sender', counts.sender], ['thread', counts.thread], ['rules', rules],
+          ['sent to review', counts.review], ['your corrections', counts.user],
+          ['Claude share of model calls', model ? Math.round(100 * (counts.claude || 0) / model) + '%' : '—']];
+}
+async function loadSummary() {
+  const s = await api('/api/summary');
+  $('#account').textContent = s.account;
+  $('#n-review').textContent = s.review;
+  $('#n-proposals').textContent = s.proposals_pending;
+  tiles($('#tiles-day'), byWho(s.day));
+  tiles($('#tiles-week'), byWho(s.week));
+  tiles($('#tiles-queue'), [['pending', s.queue.pending], ['processing', s.queue.processing],
+                            ['done', s.queue.done], ['failed', s.queue.failed]]);
+  return s;
+}
+
+// -- decisions ------------------------------------------------------------------
+async function ensureLabels() {
+  if (!LABELS.length) LABELS = (await api('/api/labels')).map(l => l.name);
+}
+function emailCell(r) {
+  return el('td', {},
+    el('div', {class: 'subject'}, el('a', {href: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(r.message_id)}`,
+                                            target: '_blank', rel: 'noopener noreferrer'}, r.subject || '(no subject)')),
+    el('div', {class: 'from'}, r.sender_email || r.sender || ''),
+    el('div', {class: 'when'}, when(r.received)));
+}
+function labelPicker(r, {confirm}) {
+  const select = el('select', {}, LABELS.map(name => el('option', {value: name, selected: name === r.label}, name)));
+  if (!r.label) select.prepend(el('option', {value: '', selected: true}, 'choose…'));
+  const save = async (label, isConfirm) => {
+    if (!label) return;
+    await api('/api/feedback', {message_id: r.message_id, label, confirm: isConfirm});
+    toast(isConfirm ? 'Confirmed' : `Labelled ${short(label)}`);
+  };
+  const wrap = el('div', {class: 'actions'}, select);
+  if (confirm) {
+    select.addEventListener('change', () => save(select.value, false).catch(e => toast(e.message)));
+    if (r.label && r.decided_by !== 'user')
+      wrap.append(el('button', {class: 'btn', title: 'Confirm this label', onclick: () => save(r.label, true).catch(e => toast(e.message))}, '✓'));
+  } else {
+    wrap.append(el('button', {class: 'btn primary', onclick: async (ev) => {
+      try { await save(select.value, select.value === r.label); ev.target.closest('tr').remove(); loadSummary(); }
+      catch (e) { toast(e.message); }
+    }}, 'Save'));
+  }
+  return wrap;
+}
+async function loadReview() {
+  await ensureLabels();
+  const rows = await api('/api/decisions?view=review&limit=300');
+  $('#review-rows').replaceChildren(...(rows.length ? rows.map(r => el('tr', {},
+    emailCell(r), el('td', {}, labelPicker(r, {confirm: false})),
+    el('td', {class: 'reason hide-sm'}, r.reason || ''))) :
+    [el('tr', {}, el('td', {colspan: 3, class: 'empty'}, 'Nothing waiting for review.'))]));
+}
+let recentView = 'all';
+$('#recent-filters').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  recentView = b.dataset.view;
+  document.querySelectorAll('#recent-filters button').forEach(x => x.classList.toggle('on', x === b));
+  loadRecent().catch(err => toast(err.message));
+});
+async function loadRecent() {
+  await ensureLabels();
+  const rows = await api(`/api/decisions?view=${recentView}&limit=200`);
+  $('#recent-rows').replaceChildren(...(rows.length ? rows.map(r => {
+    const [who, cls] = byClass(r);
+    return el('tr', {}, emailCell(r),
+      el('td', {}, r.action === 'label' || r.action === 'review' ? labelPicker(r, {confirm: true}) : el('span', {class: 'chip'}, r.action)),
+      el('td', {class: 'hide-sm'}, el('span', {class: 'chip ' + cls}, who),
+         r.confidence != null && r.decided_by === 'llm' ? el('span', {class: 'when'}, ` ${Math.round(r.confidence * 100)}%`) : null,
+         el('div', {class: 'reason'}, r.reason || '')));
+  }) : [el('tr', {}, el('td', {colspan: 3, class: 'empty'}, 'No decisions yet.'))]));
+}
+
+// -- proposals --------------------------------------------------------------------
+async function loadProposals() {
+  const [summary, props] = await Promise.all([loadSummary(), api('/api/proposals')]);
+  document.querySelectorAll('#creation button').forEach(b => b.classList.toggle('on', b.dataset.value === summary.label_creation));
+  $('#creation-note').textContent = summary.label_creation === 'auto'
+    ? `A proposal is approved automatically once ${summary.proposal_min_messages} emails from ${summary.proposal_min_senders} different senders support it.`
+    : `Proposals wait here for you. One is marked ready once ${summary.proposal_min_messages} emails from ${summary.proposal_min_senders} different senders support it.`;
+  $('#proposal-cards').replaceChildren(...(props.length ? props.map(proposalCard) :
+    [el('div', {class: 'panel empty'}, 'No proposals yet. They appear when Claude thinks mail on a parent label belongs to a recurring category.')]));
+}
+$('#creation').addEventListener('click', async e => {
+  const b = e.target.closest('button'); if (!b) return;
+  try { await api('/api/settings', {label_creation: b.dataset.value}); toast(b.dataset.value === 'auto' ? 'Automatic' : 'Ask me'); loadProposals(); }
+  catch (err) { toast(err.message); }
+});
+function proposalCard(p) {
+  const name = el('input', {type: 'text', value: p.name});
+  const desc = el('textarea', {}, p.description);
+  const decide = async (action) => {
+    try {
+      const res = await api(`/api/proposals/${p.id}`, {action, name: name.value, description: desc.value});
+      toast(action === 'approve' ? `Approved; ${res.relabelled} emails moved` : 'Rejected');
+      loadProposals();
+    } catch (e) { toast(e.message); }
+  };
+  const pending = p.status === 'pending';
+  return el('div', {class: 'panel card'},
+    el('h3', {}, pending ? '' : p.name, el('span', {class: 'chip status-' + p.status}, p.status),
+       pending && p.ready ? el('span', {class: 'chip by-sender'}, 'ready') : null,
+       el('span', {class: 'when'}, `${p.messages} emails · ${p.senders} senders · proposed ${when(p.created_at)}`)),
+    pending ? el('div', {class: 'field'}, el('label', {}, 'Name'), name) : null,
+    pending ? el('div', {class: 'field'}, el('label', {}, 'Definition'), desc) : el('div', {class: 'reason'}, p.description),
+    p.examples.length ? el('ul', {}, p.examples.map(m => el('li', {}, `${m.sender_email} — ${m.subject || '(no subject)'}`))) : null,
+    pending ? el('div', {class: 'actions'},
+      el('button', {class: 'btn primary', onclick: () => decide('approve')}, 'Approve'),
+      el('button', {class: 'btn danger', onclick: () => decide('reject')}, 'Reject')) : null);
+}
+
+// -- definitions ------------------------------------------------------------------
+async function loadLabels() {
+  const labels = await api('/api/labels');
+  LABELS = labels.map(l => l.name);
+  $('#label-cards').replaceChildren(...labels.map(l => {
+    const desc = el('textarea', {}, l.description);
+    return el('div', {class: 'panel card'},
+      el('h3', {}, l.name, el('span', {class: 'when'}, `${l.messages} emails`),
+         l.source === 'user' ? el('span', {class: 'edited'}, 'edited by you') : null,
+         l.source === 'proposal' ? el('span', {class: 'chip by-sender'}, 'from a proposal') : null),
+      desc,
+      el('div', {class: 'actions', style: 'margin-top:6px'},
+        el('button', {class: 'btn', onclick: async () => {
+          try { await api('/api/labels', {name: l.name, description: desc.value}); toast('Saved'); loadLabels(); }
+          catch (e) { toast(e.message); }
+        }}, 'Save'),
+        l.source === 'user' && l.builtin ? el('button', {class: 'btn', onclick: () => { desc.value = l.builtin; }}, 'Reset to labels.py') : null));
+  }));
+}
+
+// -- senders ------------------------------------------------------------------------
+async function loadSenders() {
+  const rows = await api('/api/senders');
+  $('#sender-rows').replaceChildren(...(rows.length ? rows.map(r => el('tr', {},
+    el('td', {class: 'subject'}, r.sender_email),
+    el('td', {}, r.label ? el('span', {class: 'chip'}, short(r.label))
+                         : el('span', {class: 'chip by-review', title: r.recent_labels.join(', ')}, 'mixed: back to the models')),
+    el('td', {}, r.streak || '—'),
+    el('td', {}, r.shortcuts))) :
+    [el('tr', {}, el('td', {colspan: 4, class: 'empty'}, 'No known senders yet: it takes 3 matching emails.'))]));
+}
+
+let start = 'overview';
+try { start = localStorage.getItem('tab') || start; } catch (e) {}
+show(loaders[start] ? start : 'overview');
+loadSummary().catch(err => toast(err.message));
+setInterval(() => { if (document.visibilityState === 'visible') loadSummary().catch(() => {}); }, 60000);
+</script>
+</body>
+</html>

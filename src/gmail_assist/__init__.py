@@ -45,7 +45,19 @@ def serve(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
         parser.error('serve needs --topic and --audience (or GMAIL_ASSIST_TOPIC / GMAIL_ASSIST_PUSH_AUDIENCE)')
     serve(get_service('read'), args.topic, args.audience, args.service_account,
           host=args.host, port=args.port, path=args.path, db=args.db,
-          triage=not args.no_triage, workers=args.workers)
+          triage=not args.no_triage, workers=args.workers, dashboard_port=args.dashboard_port)
+
+
+def dashboard_cmd(args: argparse.Namespace) -> None:
+    import threading
+
+    from gmail_assist import dashboard
+
+    service = get_service('read')
+    account = service.users().getProfile(userId='me').execute()['emailAddress']
+    dashboard.start(account, args.db, port=args.port)
+    print(f'Dashboard on http://127.0.0.1:{args.port} (Ctrl-C to stop)')
+    threading.Event().wait()
 
 
 def process(args: argparse.Namespace) -> None:
@@ -121,6 +133,11 @@ def main() -> None:
                    help="only sync; don't run new mail through the triage graph")
     p.add_argument('--workers', type=int, default=4,
                    help='messages triaged in parallel (default 4); match llama-server -np')
+    p.add_argument('--dashboard-port', type=int, default=8090,
+                   help='serve the dashboard on 127.0.0.1 at this port (default 8090; 0 = off)')
+    p.add_argument('--db', help='store path (default: ~/.local/share/gmail_assist/store.db)')
+    p = sub.add_parser('dashboard', help='serve only the dashboard (serve already includes it)')
+    p.add_argument('--port', type=int, default=8090)
     p.add_argument('--db', help='store path (default: ~/.local/share/gmail_assist/store.db)')
     p = sub.add_parser('process', help='run pending messages through the triage graph (dry run)')
     p.add_argument('--limit', type=int, default=20)
@@ -156,5 +173,7 @@ def run_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> No
         process(args)
     elif args.command == 'eval':
         eval_cmd(args)
+    elif args.command == 'dashboard':
+        dashboard_cmd(args)
     else:
         labels()

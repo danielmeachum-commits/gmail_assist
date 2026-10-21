@@ -98,7 +98,7 @@ def reference(service, workers: int = 4, relabel: list[str] | None = None) -> Pa
     already labelled are kept, except those whose reference is in `relabel`
     (e.g. after changing those labels' definitions)."""
     names = _gmail_labels(service)
-    gmail_names = list(names.values())
+    definitions = {k: v for k, v in DEFINITIONS.items() if k in set(names.values())}
     store = eval_store()
     models = Models()
     llm = models.get(REFERENCE_MODEL, effort=REFERENCE_EFFORT)
@@ -106,7 +106,7 @@ def reference(service, workers: int = 4, relabel: list[str] | None = None) -> Pa
         messages = list(s.scalars(select(Message)))
 
     def label_one(msg: Message) -> tuple[str, dict | None]:
-        options = choices(gmail_names, automated(msg.kind, msg.sender_email))
+        options = choices(definitions, automated(msg.kind, msg.sender_email))
         try:
             result = llm.structured(_reference_schema(options)).invoke([
                 SystemMessage(reference_prompt(options)),
@@ -161,7 +161,8 @@ def score(service, workers: int = 4) -> dict:
     the summary. Local model only: costs nothing."""
     from gmail_assist.agent import nodes
 
-    gmail_names = list(_gmail_labels(service).values())
+    gmail_names = set(_gmail_labels(service).values())
+    definitions = {k: v for k, v in DEFINITIONS.items() if k in gmail_names}
     ref = json.loads((eval_dir() / 'reference.json').read_text())
     store = eval_store()
     # Emails shown to the model as examples would score themselves.
@@ -172,9 +173,9 @@ def score(service, workers: int = 4) -> dict:
     llm = Models().get(nodes.LOCAL_MODEL)
 
     def score_one(msg: Message) -> dict:
-        options = choices(gmail_names, automated(msg.kind, msg.sender_email))
+        options = choices(definitions, automated(msg.kind, msg.sender_email))
         try:
-            attempt = nodes._vote(llm, initial_state(msg), options)
+            attempt = nodes._vote(llm, initial_state(msg), options, definitions)
         except Exception as err:
             log.error('vote failed for %s: %s: %s', msg.id, type(err).__name__, err)
             return {'id': msg.id, 'error': str(err)}

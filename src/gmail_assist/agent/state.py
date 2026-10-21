@@ -22,6 +22,10 @@ class DecisionDraft(TypedDict, total=False):
     reason: str
     model: str
     confidence: float
+    # A sub-label this message supports; it's labelled with the parent meanwhile.
+    proposal: str
+    proposal_description: str
+    proposed_by: str           # the model that proposed it
 
 
 class SubscriptionFlag(TypedDict):
@@ -47,6 +51,7 @@ class EmailState(TypedDict, total=False):
     # -- working values set by nodes ---------------------------------------
     is_login_code: bool
     inherited: bool             # took an earlier message's thread label
+    known_sender: bool          # labelled from the sender's history, no model
     subscription_stats: dict[str, Any] | None
     # The model classify uses next, as "<provider>:<model>"; set by
     # choose_model and changed by escalate. None means no model available.
@@ -55,6 +60,9 @@ class EmailState(TypedDict, total=False):
     # One entry per classify run: {'model': ..., 'classification': {...}}.
     # Only the last becomes a decision; all are kept in the message's result.
     attempts: Annotated[list[dict[str, Any]], operator.add]
+    # What refine_parent made of a parent-label answer: {'model', 'choice',
+    # 'label', 'description', 'reason'}.
+    refinement: dict[str, Any] | None
 
     # -- output -------------------------------------------------------------
     # operator.add makes this a reducer: each node returns only its new
@@ -68,7 +76,9 @@ class Context:
     """Per-run dependencies, reached in nodes via runtime.context."""
     store: Store
     account: str
-    labels: list[str] = field(default_factory=list)  # existing Gmail user labels
+    # The labels models may choose, name -> definition: those defined in the
+    # store and present in Gmail, plus approved sub-labels not created yet.
+    definitions: dict[str, str] = field(default_factory=dict)
     models: Models = field(default_factory=Models)
 
 
