@@ -12,7 +12,7 @@ on time, or when it starts if it was down then (up to CATCH_UP late).
 """
 import logging
 import threading
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -37,10 +37,15 @@ EXCERPT_CHARS = 500
 class Item(BaseModel):
     message_ids: list[str] = Field(description='The email ids (from the list) this item covers; '
                                                'several when they are about the same thing.')
-    title: str = Field(description='What it is, in a few words, e.g. "Duke Energy bill".')
-    due: str | None = Field(description='The due date, event date or deadline exactly as the email '
-                                        'gives it, or null if there is none. Never guess one.')
-    note: str = Field(description='One short sentence: what to do, or why it matters.')
+    title: str = Field(description='What it is, at most 6 words, e.g. "Duke Energy bill".')
+    due: str | None = Field(description='The due date, event date or deadline, short, e.g. '
+                                        '"Thu Oct 22, 7 PM" or "by Nov 3"; null if there is none.')
+    start: str | None = Field(description='The same date in ISO 8601 local time: "2026-10-22T19:00" '
+                                          'with a time, "2026-10-22" without. Null if none. Resolve '
+                                          'weekdays and missing years against Now. Never guess a '
+                                          'date the email does not give.')
+    end: str | None = Field(description='When it ends, same format, if the email says; else null.')
+    note: str = Field(description='What to do or why it matters, at most 12 words.')
 
 
 class Briefing(BaseModel):
@@ -62,10 +67,27 @@ if it belongs there, and leave out any that don't matter after all.
   news. At most 10, most useful first.
 - Emails marked "still open" arrived earlier and are unread: include them
   under act if they still look current.
-- Give dates exactly as the email does; never invent one. Use only the
-  email ids listed. Be brief: this is read on a phone.
+- Never invent a date. Use only the email ids listed.
+- Be terse: this is read on a phone. Titles of at most 6 words, notes of at
+  most 12, a headline of at most 20. No filler like "please note".
 
 Now: {now}"""
+
+
+def _iso_local(value: str | None) -> str | None:
+    """`value` if it's a valid date ("2026-10-22") or local date and time
+    ("2026-10-22T19:00"), else None: the calendar button needs one of those."""
+    if not value:
+        return None
+    value = value.strip()
+    try:
+        if len(value) == 10:
+            return date.fromisoformat(value).isoformat()
+        parsed = datetime.fromisoformat(value)
+        # A zone, if the model added one, is dropped: times are local here.
+        return parsed.replace(tzinfo=None, second=0, microsecond=0).isoformat(timespec='minutes')
+    except ValueError:
+        return None
 
 
 def _excerpt(msg) -> str:
@@ -111,7 +133,11 @@ def write_summary(store: Store, account: str, kind: str, start: datetime, end: d
                 ids = [i for i in item.message_ids if i in by_id]
                 if not ids:
                     continue  # an id the model made up
-                out.append({**item.model_dump(), 'message_ids': ids, 'emails': [
+                start, end = _iso_local(item.start), _iso_local(item.end)
+                if not start or (end and len(end) != len(start)):
+                    end = None
+                out.append({**item.model_dump(), 'start': start, 'end': end,
+                            'message_ids': ids, 'emails': [
                     {'id': i, 'sender_email': by_id[i].sender_email, 'subject': by_id[i].subject,
                      'unread': by_id[i].unread} for i in ids]})
             return out

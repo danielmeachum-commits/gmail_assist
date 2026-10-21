@@ -86,10 +86,19 @@ def _decision_row(d: Decision, m: Message) -> dict[str, Any]:
     }
 
 
+def local_zone() -> str | None:
+    """This machine's IANA zone (e.g. America/New_York): summaries' dates
+    are in it, and calendar links say so."""
+    try:
+        return str(Path('/etc/localtime').resolve()).split('zoneinfo/', 1)[1]
+    except (OSError, IndexError):
+        return None
+
+
 def _summary_row(s: Summary) -> dict[str, Any]:
     return {'id': s.id, 'kind': s.kind, 'period_start': _iso(s.period_start),
             'period_end': _iso(s.period_end), 'created_at': _iso(s.created_at),
-            'model': s.model, **s.content}
+            'model': s.model, 'tz': local_zone(), **s.content}
 
 
 class Api:

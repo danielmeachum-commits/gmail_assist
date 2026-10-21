@@ -87,15 +87,61 @@ button.danger { color: var(--bad); }
 .att-read { background: var(--accent-soft); color: var(--accent); }
 .att-skip { background: var(--chip); color: var(--muted); }
 select.att { padding: 1px 4px; font-size: 12px; border-radius: 10px; }
-.brief { padding: 16px; }
-.brief .headline { font-size: 15px; font-weight: 600; margin: 4px 0 12px; }
-.brief h4 { margin: 14px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
-.item { padding: 8px 0; border-top: 1px solid var(--line); }
-.item:first-of-type { border-top: 0; }
-.item .t { font-weight: 600; } .item .due { color: var(--bad); font-weight: 600; margin-left: 6px; font-size: 12px; }
-.item .links { font-size: 12px; margin-top: 2px; }
-.item .links a { color: var(--accent); text-decoration: none; margin-right: 10px; overflow-wrap: anywhere; }
-.unread { font-weight: 600; }
+/* Today */
+.today-top { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.today-top select { flex: 1 1 200px; }
+.hero { padding: 16px 18px; }
+.eyebrow { color: var(--muted); font-size: 12px; }
+.hero .headline { font-size: 17px; font-weight: 650; line-height: 1.35; margin: 6px 0 14px; }
+.jump { display: flex; gap: 8px; flex-wrap: wrap; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 999px; text-decoration: none;
+  font-size: 13px; font-weight: 600; border: 1px solid var(--line); color: var(--text); background: var(--panel); }
+.pill b { font-variant-numeric: tabular-nums; }
+.pill.act { border-color: var(--bad); color: var(--bad); }
+.pill.read { border-color: var(--accent); color: var(--accent); }
+.sec { margin-top: 22px; scroll-margin-top: 120px; }
+.sec-h { display: flex; align-items: baseline; gap: 8px; margin: 0 2px 8px; font-size: 13px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .05em; }
+.sec-h .hint { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--muted); font-size: 12px; }
+.sec-h.act { color: var(--bad); } .sec-h.read { color: var(--accent); } .sec-h.needs { color: var(--warn); }
+.list { overflow: hidden; }
+.it { display: grid; grid-template-columns: 52px 1fr auto; gap: 12px; align-items: start; padding: 12px 14px;
+  border-top: 1px solid var(--line); border-left: 3px solid transparent; }
+.it:first-child { border-top: 0; }
+.it.act { border-left-color: var(--warn); } .it.act.soon { border-left-color: var(--bad); }
+.it.read { border-left-color: var(--accent); }
+.datebox { width: 52px; text-align: center; border: 1px solid var(--line); border-radius: 8px; padding: 3px 0 4px; line-height: 1.1; background: var(--bg); }
+.datebox .m { font-size: 10px; font-weight: 700; color: var(--bad); text-transform: uppercase; letter-spacing: .05em; }
+.datebox .d { font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.datebox .h { font-size: 10px; color: var(--muted); }
+.datebox.none { border-style: dashed; color: var(--muted); padding: 12px 0; font-size: 12px; }
+.it .t { font-weight: 650; }
+.it .n { color: var(--muted); font-size: 13px; margin-top: 1px; }
+.it .due { display: inline-block; margin-top: 4px; font-size: 12px; font-weight: 600; color: var(--bad); }
+.src { margin-top: 4px; font-size: 12px; }
+.src summary { cursor: pointer; color: var(--muted); list-style: none; display: inline; }
+.src summary::-webkit-details-marker { display: none; }
+.src summary::after { content: ' ▾'; } .src[open] summary::after { content: ' ▴'; }
+.src a { display: block; color: var(--accent); text-decoration: none; margin-top: 3px; overflow-wrap: anywhere; }
+.it-acts { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+a.cal { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; text-decoration: none; white-space: nowrap;
+  color: var(--accent); border: 1px solid var(--accent); border-radius: 6px; padding: 4px 8px; }
+a.cal:hover { background: var(--accent-soft); }
+.it.compact { grid-template-columns: 1fr auto; padding: 10px 14px; }
+button.btn.done { background: var(--good-soft); color: var(--good); border-color: var(--good); cursor: default; }
+select.saved { outline: 2px solid var(--good); outline-offset: 1px; }
+.filters .spacer { flex: 1; }
+tr.grp th { background: var(--bg); color: var(--text); font-size: 13px; font-weight: 650; cursor: pointer; user-select: none; }
+tr.grp th .when { font-weight: 400; margin-left: 6px; }
+tr.grp th::before { content: '▾ '; color: var(--muted); }
+tbody.closed tr.grp th::before { content: '▸ '; }
+tbody.closed tr:not(.grp) { display: none; }
+.foot { color: var(--muted); font-size: 12px; margin: 10px 2px 0; }
+.unread { font-weight: 650; }
+@media (max-width: 560px) {
+  .it { grid-template-columns: 44px 1fr; } .datebox { width: 44px; }
+  .it-acts { grid-column: 2; flex-direction: row; align-items: center; }
+}
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: space-between; }
 dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--text); width: min(480px, calc(100vw - 32px)); padding: 16px; }
 dialog::backdrop { background: rgba(0,0,0,.35); }
@@ -125,14 +171,15 @@ dialog select, dialog input[type=text] { width: 100%; }
 </header>
 <main>
   <section id="today" class="on">
-    <div class="row">
-      <select id="summary-pick" aria-label="Summary"></select>
+    <div class="today-top">
+      <select id="summary-pick" aria-label="Which summary"></select>
       <button class="btn" id="summary-now">Write one now</button>
     </div>
-    <div class="panel brief" id="summary" style="margin-top:10px"></div>
-    <h2>Needs you <span class="when">(marked act in the last 3 days; bold = unread)</span></h2>
-    <div class="panel"><table><thead><tr><th>Email</th><th>Label</th><th>Needs you?</th></tr></thead>
-      <tbody id="needs-rows"></tbody></table></div>
+    <div id="summary"></div>
+    <div class="sec" id="sec-needs">
+      <div class="sec-h needs">Needs you <span class="hint">marked act in the last 3 days · bold = unread</span></div>
+      <div class="panel list" id="needs-list"></div>
+    </div>
   </section>
 
   <section id="overview">
@@ -155,10 +202,12 @@ dialog select, dialog input[type=text] { width: 100%; }
       <button class="btn" data-view="thread">Thread</button>
       <button class="btn" data-view="proposal">New sub-label</button>
       <button class="btn" data-view="user">Your corrections</button>
+      <span class="spacer"></span>
+      <button class="btn" id="recent-group" aria-pressed="false">Group by label</button>
     </div>
     <p class="note">Change a label to correct it, or ✓ to confirm it. Both count toward sender history.</p>
-    <div class="panel"><table><thead><tr><th>Email</th><th>Label</th><th class="hide-sm">Decided by</th></tr></thead>
-      <tbody id="recent-rows"></tbody></table></div>
+    <div class="panel"><table id="recent-table"><thead><tr><th>Email</th><th>Label</th><th class="hide-sm">Decided by</th></tr></thead>
+      <tbody></tbody></table></div>
   </section>
 
   <section id="proposals">
@@ -309,11 +358,25 @@ function labelPicker(r, {confirm}) {
   };
   const wrap = el('div', {class: 'actions'}, select);
   if (confirm) {
+    const ok = el('button', {class: 'btn', title: 'Confirm this label'}, '✓');
+    // Once you've confirmed or corrected it, the row says so and ✓ is done.
+    const settled = (text) => { ok.textContent = text; ok.classList.add('done'); ok.disabled = true; };
     // ✓ confirms what the dropdown shows now, not the label the row loaded with.
-    select.addEventListener('change', () => save(select.value, false).then(() => { r.label = select.value; })
-                                               .catch(e => toast(e.message)));
-    if (r.label && r.decided_by !== 'user')
-      wrap.append(el('button', {class: 'btn', title: 'Confirm this label', onclick: () => save(select.value, true).catch(e => toast(e.message))}, '✓'));
+    ok.addEventListener('click', async () => {
+      ok.disabled = true; ok.textContent = '…';
+      try { await save(select.value, true); settled('✓ Confirmed'); }
+      catch (e) { ok.disabled = false; ok.textContent = '✓'; toast(e.message); }
+    });
+    select.addEventListener('change', async () => {
+      try {
+        await save(select.value, false);
+        r.label = select.value;
+        select.classList.add('saved'); setTimeout(() => select.classList.remove('saved'), 1500);
+        settled('✓ Saved');
+      } catch (e) { toast(e.message); }
+    });
+    if (r.decided_by === 'user') settled('✓ Yours');
+    if (r.label) wrap.append(ok);
   } else {
     wrap.append(el('button', {class: 'btn primary', onclick: async (ev) => {
       try { await save(select.value, select.value === r.label); ev.target.closest('tr').remove(); loadSummary(); }
@@ -332,22 +395,52 @@ async function loadReview() {
 }
 let recentView = 'all';
 $('#recent-filters').addEventListener('click', e => {
-  const b = e.target.closest('button'); if (!b) return;
+  const b = e.target.closest('button[data-view]'); if (!b) return;
   recentView = b.dataset.view;
-  document.querySelectorAll('#recent-filters button').forEach(x => x.classList.toggle('on', x === b));
+  document.querySelectorAll('#recent-filters button[data-view]').forEach(x => x.classList.toggle('on', x === b));
   loadRecent().catch(err => toast(err.message));
 });
+let recentGrouped = false;
+try { recentGrouped = localStorage.getItem('recentGrouped') === '1'; } catch (e) {}
+$('#recent-group').addEventListener('click', () => {
+  recentGrouped = !recentGrouped;
+  try { localStorage.setItem('recentGrouped', recentGrouped ? '1' : '0'); } catch (e) {}
+  loadRecent().catch(err => toast(err.message));
+});
+function recentRow(r) {
+  const [who, cls] = byClass(r);
+  return el('tr', {}, emailCell(r),
+    el('td', {}, r.action === 'label' || r.action === 'review' ? labelPicker(r, {confirm: true}) : el('span', {class: 'chip'}, r.action)),
+    el('td', {class: 'hide-sm'}, attentionPicker(r), ' ', el('span', {class: 'chip ' + cls}, who),
+       r.confidence != null && r.decided_by === 'llm' ? el('span', {class: 'when'}, ` ${Math.round(r.confidence * 100)}%`) : null,
+       el('div', {class: 'reason'}, r.reason || '')));
+}
 async function loadRecent() {
   await ensureLabels();
   const rows = await api(`/api/decisions?view=${recentView}&limit=200`);
-  $('#recent-rows').replaceChildren(...(rows.length ? rows.map(r => {
-    const [who, cls] = byClass(r);
-    return el('tr', {}, emailCell(r),
-      el('td', {}, r.action === 'label' || r.action === 'review' ? labelPicker(r, {confirm: true}) : el('span', {class: 'chip'}, r.action)),
-      el('td', {class: 'hide-sm'}, attentionPicker(r), ' ', el('span', {class: 'chip ' + cls}, who),
-         r.confidence != null && r.decided_by === 'llm' ? el('span', {class: 'when'}, ` ${Math.round(r.confidence * 100)}%`) : null,
-         el('div', {class: 'reason'}, r.reason || '')));
-  }) : [el('tr', {}, el('td', {colspan: 3, class: 'empty'}, 'No decisions yet.'))]));
+  const button = $('#recent-group');
+  button.classList.toggle('on', recentGrouped); button.setAttribute('aria-pressed', recentGrouped);
+  const table = $('#recent-table');
+  table.querySelectorAll('tbody').forEach(t => t.remove());
+  if (!rows.length) {
+    table.append(el('tbody', {}, el('tr', {}, el('td', {colspan: 3, class: 'empty'}, 'No decisions yet.'))));
+    return;
+  }
+  if (!recentGrouped) { table.append(el('tbody', {}, rows.map(recentRow))); return; }
+  // One section per label, biggest first; click a heading to fold it.
+  const groups = new Map();
+  for (const r of rows) {
+    const key = r.action === 'review' ? 'Needs review' : (r.label || r.action);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  }
+  for (const [label, members] of [...groups].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))) {
+    const body = el('tbody', {});
+    body.append(el('tr', {class: 'grp', onclick: () => body.classList.toggle('closed')},
+                   el('th', {colspan: 3}, label, el('span', {class: 'when'}, `${members.length}`))),
+                ...members.map(recentRow));
+    table.append(body);
+  }
 }
 
 // -- proposals --------------------------------------------------------------------
@@ -461,44 +554,103 @@ $('#label-new').addEventListener('click', async () => {
 
 // -- today ------------------------------------------------------------------------
 let SUMMARIES = [];
+let NEEDS = [];
 function gmailLink(id, text, unread) {
   return el('a', {href: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(id)}`, target: '_blank',
                   rel: 'noopener noreferrer', class: unread ? 'unread' : null}, text);
 }
+// Summary dates are wall-clock times in the server's zone ("2026-10-22T19:00"
+// or "2026-10-22"): read their parts directly, never through the browser's zone.
+function parts(iso) {
+  const [y, mo, d, h, mi] = iso.split(/[-T:]/).map(Number);
+  return {y, mo, d, h, mi, timed: iso.length > 10};
+}
+const pad = (n) => String(n).padStart(2, '0');
+function shift(p, {days = 0, hours = 0}) {
+  const t = new Date(Date.UTC(p.y, p.mo - 1, p.d + days, (p.h || 0) + hours, p.mi || 0));
+  return {y: t.getUTCFullYear(), mo: t.getUTCMonth() + 1, d: t.getUTCDate(), h: t.getUTCHours(), mi: t.getUTCMinutes(), timed: p.timed};
+}
+const stamp = (p) => `${p.y}${pad(p.mo)}${pad(p.d)}` + (p.timed ? `T${pad(p.h)}${pad(p.mi)}00` : '');
+function calendarUrl(it, tz) {
+  const a = parts(it.start);
+  // All-day events end the day after (exclusive); timed ones default to an hour.
+  const b = it.end ? (a.timed ? parts(it.end) : shift(parts(it.end), {days: 1}))
+                   : (a.timed ? shift(a, {hours: 1}) : shift(a, {days: 1}));
+  const links = it.emails.map(e => `https://mail.google.com/mail/u/0/#all/${e.id}`).join('\n');
+  const q = new URLSearchParams({action: 'TEMPLATE', text: it.title, dates: `${stamp(a)}/${stamp(b)}`,
+                                 details: `${it.note}\n\n${links}`});
+  if (tz && a.timed) q.set('ctz', tz);
+  return `https://calendar.google.com/calendar/render?${q}`;
+}
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function dateBox(it) {
+  if (!it.start) return el('div', {class: 'datebox none', 'aria-hidden': 'true'}, '—');
+  const p = parts(it.start);
+  const hour = p.timed ? `${(p.h % 12) || 12}${p.mi ? ':' + pad(p.mi) : ''} ${p.h < 12 ? 'AM' : 'PM'}` : '';
+  return el('div', {class: 'datebox'}, el('div', {class: 'm'}, MONTHS[p.mo - 1]), el('div', {class: 'd'}, p.d),
+            hour ? el('div', {class: 'h'}, hour) : null);
+}
+function isSoon(it) {
+  if (!it.start) return false;
+  const p = parts(it.start);
+  const then = Date.UTC(p.y, p.mo - 1, p.d);
+  const n = new Date(); const today = Date.UTC(n.getFullYear(), n.getMonth(), n.getDate());
+  return then - today <= 2 * 86400000;   // within two days, or already past
+}
+function itemRow(it, kind, tz) {
+  const n = it.emails.length;
+  return el('div', {class: `it ${kind}` + (kind === 'act' && isSoon(it) ? ' soon' : '')},
+    dateBox(it),
+    el('div', {},
+      el('div', {class: 't'}, it.title),
+      it.note ? el('div', {class: 'n'}, it.note) : null,
+      it.due && !it.start ? el('div', {class: 'due'}, it.due) : null,
+      el('details', {class: 'src'}, el('summary', {}, n === 1 ? '1 email' : `${n} emails`),
+         it.emails.map(e => gmailLink(e.id, `${e.sender_email || ''} — ${e.subject || '(no subject)'}`, e.unread)))),
+    el('div', {class: 'it-acts'},
+      it.start ? el('a', {class: 'cal', href: calendarUrl(it, tz), target: '_blank', rel: 'noopener noreferrer',
+                          title: 'Opens Google Calendar with the event filled in'}, '＋ Calendar') : null));
+}
 function renderSummary(sm) {
   const box = $('#summary');
   if (!sm) {
-    box.replaceChildren(el('div', {class: 'empty'}, 'No summaries yet. The first arrives at 7 AM or 6 PM, or write one now.'));
+    box.replaceChildren(el('div', {class: 'panel empty'}, 'No summaries yet. The first arrives at 7 AM or 6 PM, or write one now.'));
     return;
   }
-  const items = (list) => list.map(it => el('div', {class: 'item'},
-    el('div', {}, el('span', {class: 't'}, it.title), it.due ? el('span', {class: 'due'}, it.due) : null),
-    el('div', {class: 'reason'}, it.note),
-    el('div', {class: 'links'}, it.emails.map(e => gmailLink(e.id, `${e.sender_email || ''}: ${e.subject || '(no subject)'}`, e.unread)))));
   const label = {morning: 'Morning briefing', evening: 'Evening recap', manual: 'Summary'}[sm.kind] || sm.kind;
+  const section = (id, kind, title, hint, list) => el('div', {class: 'sec', id},
+    el('div', {class: `sec-h ${kind}`}, title, el('span', {class: 'hint'}, hint)),
+    el('div', {class: 'panel list'}, list.length ? list.map(it => itemRow(it, kind, sm.tz))
+                                                 : el('div', {class: 'empty'}, 'Nothing here.')));
   box.replaceChildren(
-    el('div', {class: 'when'}, `${label} · ${when(sm.period_start)} – ${when(sm.period_end)}`),
-    el('div', {class: 'headline'}, sm.headline),
-    // replaceChildren() doesn't flatten arrays (el() does): spread the lists.
-    el('h4', {}, `To do (${sm.act.length})`), ...(sm.act.length ? items(sm.act) : [el('div', {class: 'reason'}, 'Nothing.')]),
-    el('h4', {}, `Worth a look (${sm.read.length})`), ...(sm.read.length ? items(sm.read) : [el('div', {class: 'reason'}, 'Nothing.')]),
-    el('div', {class: 'when', style: 'margin-top:10px'},
-       `${sm.counts.act} act · ${sm.counts.read} read in this period · ${sm.counts.still_open} still open from before`));
+    el('div', {class: 'panel hero'},
+      el('div', {class: 'eyebrow'}, `${label} · ${when(sm.period_start)} – ${when(sm.period_end)}`),
+      el('div', {class: 'headline'}, sm.headline),
+      el('nav', {class: 'jump', 'aria-label': 'Sections'},
+        el('a', {class: 'pill act', href: '#sec-act'}, 'To do ', el('b', {}, sm.act.length)),
+        el('a', {class: 'pill read', href: '#sec-read'}, 'Worth a look ', el('b', {}, sm.read.length)),
+        el('a', {class: 'pill', href: '#sec-needs'}, 'Needs you ', el('b', {}, NEEDS.length)))),
+    section('sec-act', 'act', 'To do', 'most urgent first', sm.act),
+    section('sec-read', 'read', 'Worth a look', 'nothing to do', sm.read),
+    el('div', {class: 'foot'}, `${sm.counts.act} act · ${sm.counts.read} read in this period · ` +
+                               `${sm.counts.still_open} still open from before`));
 }
 async function loadToday() {
   await ensureLabels();
   const [summaries, needs] = await Promise.all([api('/api/summaries'), api('/api/needs-you')]);
-  SUMMARIES = summaries;
+  SUMMARIES = summaries; NEEDS = needs;
   const pick = $('#summary-pick');
   pick.replaceChildren(...(summaries.length ? summaries.map((sm, i) => el('option', {value: i},
-    `${{morning: 'Morning', evening: 'Evening', manual: 'On demand'}[sm.kind] || sm.kind} · ${when(sm.period_end)}`)) :
+    `${{morning: 'Morning briefing', evening: 'Evening recap', manual: 'On demand'}[sm.kind] || sm.kind} · ${when(sm.period_end)}`)) :
     [el('option', {}, 'No summaries yet')]));
   renderSummary(summaries[0]);
   $('#n-act').textContent = needs.filter(r => r.unread).length;
-  $('#needs-rows').replaceChildren(...(needs.length ? needs.map(r => el('tr', {},
-    emailCell(r), el('td', {}, el('span', {class: 'chip'}, short(r.label))), el('td', {}, attentionPicker(r)))) :
-    [el('tr', {}, el('td', {colspan: 3, class: 'empty'}, 'Nothing marked act in the last 3 days.'))]));
-  document.querySelectorAll('#needs-rows .subject a').forEach((a, i) => { if (needs[i].unread) a.classList.add('unread'); });
+  $('#needs-list').replaceChildren(...(needs.length ? needs.map(r => el('div', {class: 'it compact'},
+    el('div', {},
+      el('div', {class: 't'}, gmailLink(r.message_id, r.subject || '(no subject)', r.unread)),
+      el('div', {class: 'n'}, `${r.sender_email || r.sender || ''} · ${when(r.received)}`)),
+    el('div', {class: 'it-acts'}, el('span', {class: 'chip'}, short(r.label)), attentionPicker(r)))) :
+    [el('div', {class: 'empty'}, 'Nothing marked act in the last 3 days.')]));
 }
 $('#summary-pick').addEventListener('change', e => renderSummary(SUMMARIES[+e.target.value]));
 $('#summary-now').addEventListener('click', async (ev) => {
