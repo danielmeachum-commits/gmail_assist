@@ -136,7 +136,8 @@ def run_graph(graph, msg: Message, ctx: Context, live: bool = True) -> EmailStat
 
 
 def process(service, store: Store, limit: int = 20, kind: Kind | None = None,
-            workers: int = 4, synced_since: datetime | None = None) -> dict[str, int]:
+            workers: int = 4, synced_since: datetime | None = None,
+            newest_first: bool = False) -> dict[str, int]:
     """`workers` messages run through the graph at once. Match it to the
     local server's parallel slots (llama-server -np N); more workers than
     slots just queue at the server. `synced_since` only takes messages synced
@@ -156,7 +157,7 @@ def process(service, store: Store, limit: int = 20, kind: Kind | None = None,
     try:
         with ls.tracing_context(enabled=traced, project_name=LANGSMITH_PROJECT):
             messages = store.claim_batch(limit, account=account, kind=kind,
-                                         synced_since=synced_since)
+                                         synced_since=synced_since, newest_first=newest_first)
             if workers <= 1:
                 outcomes = [_process_one(graph, store, ctx, msg, live=True) for msg in messages]
             else:

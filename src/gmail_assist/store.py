@@ -72,6 +72,13 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _triageable():
+    """Not in Trash or Spam. (label_ids is a JSON array stored as text:
+    match the quoted name.)"""
+    labels = cast(Message.label_ids, Text)
+    return ~labels.like('%"TRASH"%') & ~labels.like('%"SPAM"%')
+
+
 class Base(DeclarativeBase):
     type_annotation_map = {
         datetime: DateTime(timezone=True),
@@ -557,17 +564,21 @@ class Store:
     # -- batch processing queue ---------------------------------------------
 
     def claim_batch(self, limit: int = 50, account: str | None = None,
-                    kind: Kind | None = None, synced_since: datetime | None = None) -> list[Message]:
-        """Atomically move up to `limit` pending messages to 'processing'.
-        `synced_since` limits it to messages synced at or after that time."""
-        pending = select(Message.account, Message.id).where(Message.status == 'pending')
+                    kind: Kind | None = None, synced_since: datetime | None = None,
+                    newest_first: bool = False) -> list[Message]:
+        """Atomically move up to `limit` pending messages to 'processing',
+        oldest first unless `newest_first`. `synced_since` limits it to
+        messages synced at or after that time. Mail in Trash or Spam waits:
+        it's triaged if it ever comes back out."""
+        pending = select(Message.account, Message.id).where(Message.status == 'pending', _triageable())
         if account:
             pending = pending.where(Message.account == account)
         if kind:
             pending = pending.where(Message.kind == kind)
         if synced_since is not None:
             pending = pending.where(Message.synced_at >= synced_since)
-        pending = pending.order_by(Message.internal_date).limit(limit)
+        order = Message.internal_date.desc() if newest_first else Message.internal_date
+        pending = pending.order_by(order).limit(limit)
 
         with self.Session.begin() as s:
             claimed = s.scalars(
@@ -577,8 +588,8 @@ class Store:
                 .returning(Message),
                 execution_options={'synchronize_session': False},
             ).all()
-        # RETURNING order is unspecified; oldest first.
-        return sorted(claimed, key=lambda m: m.internal_date or 0)
+        # RETURNING order is unspecified.
+        return sorted(claimed, key=lambda m: m.internal_date or 0, reverse=newest_first)
 
     def mark_done(self, account: str, id: str, result: dict[str, Any] | None = None) -> None:
         with self.Session.begin() as s:
@@ -618,7 +629,7 @@ class Store:
         return res.rowcount
 
     def pending_count(self, account: str, synced_since: datetime | None = None) -> int:
-        q = select(func.count()).where(Message.account == account, Message.status == 'pending')
+        q = select(func.count()).where(Message.account == account, Message.status == 'pending', _triageable())
         if synced_since is not None:
             q = q.where(Message.synced_at >= synced_since)
         with self.ReadSession() as s:

@@ -94,10 +94,35 @@ def process(args: argparse.Namespace) -> None:
     from gmail_assist.agent.run import process
     from gmail_assist.store import Store
 
+    service = get_service('read')
     with Store(args.db) as store:
-        counts = process(get_service('read'), store, limit=args.limit, kind=args.kind,
-                         workers=args.workers)
-        print(f'Processed: {counts}. Queue: {store.counts()}')
+        if not args.all:
+            counts = process(service, store, limit=args.limit, kind=args.kind, workers=args.workers)
+            print(f'Processed: {counts}. Queue: {store.counts()}')
+            return
+        # The backlog: newest first, in batches, labelling Gmail as it goes
+        # (serve only applies after a sync). Safe to stop and rerun: an
+        # interrupted batch is requeued after an hour.
+        from gmail_assist import apply
+
+        account = service.users().getProfile(userId='me').execute()['emailAddress']
+        total = {'done': 0, 'failed': 0}
+        while True:
+            counts = process(service, store, limit=args.limit, kind=args.kind,
+                             workers=args.workers, newest_first=True)
+            if not sum(counts.values()):
+                break
+            total = {k: total[k] + counts[k] for k in total}
+            if not counts['done']:
+                print('a whole batch failed (is the model server up?); stopping', file=sys.stderr)
+                break
+            try:
+                labelled = apply.apply_decisions(store, account)
+            except AuthRequired:
+                labelled = 0   # labels go on once serve has change access
+            print(f'{total} so far, {labelled} labelled in Gmail, '
+                  f'{store.pending_count(account)} left', flush=True)
+        print(f'Processed: {total}. Queue: {store.counts()}')
 
 
 def eval_cmd(args: argparse.Namespace) -> None:
@@ -172,8 +197,10 @@ def main() -> None:
     p = sub.add_parser('dashboard', help='serve only the dashboard (serve already includes it)')
     p.add_argument('--port', type=int, default=8090)
     p.add_argument('--db', help='store path (default: ~/.local/share/gmail_assist/store.db)')
-    p = sub.add_parser('process', help='run pending messages through the triage graph (dry run)')
-    p.add_argument('--limit', type=int, default=20)
+    p = sub.add_parser('process', help='run pending messages through the triage graph')
+    p.add_argument('--limit', type=int, default=20, help='messages per batch')
+    p.add_argument('--all', action='store_true',
+                   help='work through the whole queue, newest first, applying labels after each batch')
     p.add_argument('--kind', choices=['personal', 'bulk'])
     p.add_argument('--workers', type=int, default=4,
                    help='messages processed in parallel (default 4); match llama-server -np')
