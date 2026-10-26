@@ -8,9 +8,18 @@ there too. Labels in Gmail without a definition are never offered to a model.
 
 Writing a definition: say what belongs, in general terms ("bank and card
 alerts"), not who sends it. Name an organization or person only when the
-model couldn't work it out from the email itself -- a private group, or an acronym a small model may not know. Specific
-well-known senders belong in the examples (examples.json) or are learned
-from sender history.
+model couldn't work it out from the email itself -- a private group, or an
+acronym a small model may not know. Specific well-known senders belong in
+the examples (examples.json) or are learned from sender history.
+
+The repo is public, so anything about you -- labels for your own work or
+groups, definitions naming them, your name -- goes in personal.json in the
+data directory instead:
+
+    {"owner": "<text in your sender addresses>",
+     "definitions": {"<label>": "<definition>", ...}}
+
+Its definitions are added to (or replace) the ones here.
 """
 import json
 import re
@@ -24,8 +33,6 @@ PROCESSED_LABEL = 'MeachAI'
 
 # Added by rule (never by a model) to mail you sent, on top of the topic label.
 ME_LABEL = 'From a person/Me'
-# A sender address containing this is you.
-OWNER_NAME = 'your-name'
 
 # How to tell senders apart, given to every model before the label list.
 GUIDANCE = """\
@@ -78,6 +85,19 @@ DEFINITIONS: dict[str, str] = {
     'From an organization/school':
         'Schools, teachers and classroom platforms.',
 }
+
+
+def _load_personal() -> dict:
+    try:
+        return json.loads((_data_dir() / 'personal.json').read_text())
+    except FileNotFoundError:
+        return {}
+
+
+PERSONAL = _load_personal()
+DEFINITIONS |= PERSONAL.get('definitions', {})
+# A sender address containing this is you (besides the account itself).
+OWNER_NAME: str | None = PERSONAL.get('owner')
 
 
 def examples_path() -> Path:

@@ -116,12 +116,13 @@ def after_classify(state: EmailState, runtime: Runtime[Context]
 
 # -- rules ----------------------------------------------------------------------
 
-def tag_me(state: EmailState) -> dict:
+def tag_me(state: EmailState, runtime: Runtime[Context]) -> dict:
     """Mail you sent gets the Me label on top of its topic label."""
-    if OWNER_NAME in (state.get('sender_email') or ''):
+    sender = (state.get('sender_email') or '').lower()
+    if sender == runtime.context.account.lower() or (OWNER_NAME and OWNER_NAME in sender):
         return {'decisions': [{
             'action': 'label', 'label': ME_LABEL, 'decided_by': 'rule:me',
-            'reason': f'sender address contains {OWNER_NAME!r}',
+            'reason': 'sent by you',
         }]}
     return {}
 
