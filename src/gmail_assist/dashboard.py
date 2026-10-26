@@ -267,6 +267,7 @@ class Api:
             'label_creation': self.store.get_setting(self.account, 'label_creation'),
             'trash_after_unsubscribe': self.store.get_setting(self.account, 'trash_after_unsubscribe'),
             'apply_labels': self.store.get_setting(self.account, 'apply_labels'),
+            'star_act': self.store.get_setting(self.account, 'star_act'),
             'proposal_min_messages': PROPOSAL_MIN_MESSAGES,
             'proposal_min_senders': PROPOSAL_MIN_SENDERS,
         }
@@ -644,6 +645,7 @@ class Api:
         if self.store.get_message(self.account, body.get('message_id') or '') is None:
             raise ValueError('unknown message')
         self.store.set_attention(self.account, body['message_id'], level, 'user')
+        self.on_change()   # a star it added may need taking back
         return {'ok': True}
 
     def write_summary(self) -> dict[str, Any]:
@@ -654,7 +656,7 @@ class Api:
 
     def settings(self, body: dict) -> dict[str, Any]:
         allowed = {'label_creation': ('manual', 'auto'), 'trash_after_unsubscribe': ('on', 'off'),
-                   'apply_labels': ('on', 'off')}
+                   'apply_labels': ('on', 'off'), 'star_act': ('on', 'off')}
         changes = {k: v for k, v in body.items() if k in allowed}
         if not changes:
             raise ValueError(f'settings: {", ".join(allowed)}')
@@ -662,6 +664,7 @@ class Api:
             if value not in allowed[key]:
                 raise ValueError(f'{key} must be {" or ".join(allowed[key])}')
             self.store.set_setting(self.account, key, value)
+        self.on_change()
         return {'ok': True}
 
     def still_sending(self) -> dict[str, Any]:

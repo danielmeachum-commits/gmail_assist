@@ -177,12 +177,15 @@ class SyncWorker(threading.Thread):
                         log.info('requeued %d failed or stuck messages', n)
 
     def _apply(self, store: Store) -> None:
-        """Put what triage decided on the messages in Gmail."""
-        from gmail_assist.apply import apply_decisions
+        """Put what triage decided on the messages in Gmail: labels, and
+        stars on mail that needs you."""
+        from gmail_assist.apply import apply_decisions, star_act_mail
 
         try:
             if n := apply_decisions(store, self.account):
                 log.info('labelled %d messages in Gmail', n)
+            if n := star_act_mail(store, self.account):
+                log.info('starred or unstarred %d messages in Gmail', n)
         except AuthRequired:
             log.warning('labels not applied: Gmail change access is needed')
         except Exception:

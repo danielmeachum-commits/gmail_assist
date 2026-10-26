@@ -17,6 +17,9 @@ created first. Messages needing the same change share batchModify calls.
 Decisions that ask for no label (review, expire) are left unapplied for now.
 
 Uses the 'modify' grant; the apply_labels setting turns it off.
+
+It also stars mail rated 'act' (star_act_mail), so it shows in a starred
+view; the star_act setting turns that off.
 """
 import logging
 from collections import defaultdict
@@ -127,3 +130,26 @@ def apply_decisions(store: Store, account: str) -> int:
     if failed:
         log.warning('could not label %d messages, e.g. %s', len(failed), next(iter(failed.values())))
     return len(done)
+
+
+def star_act_mail(store: Store, account: str) -> int:
+    """Star 'act' mail not starred yet, and take back stars this added to
+    mail you've since rated otherwise. Returns how many messages changed."""
+    if store.get_setting(account, 'star_act') != 'on':
+        return 0
+    to_star, to_unstar = store.star_plan(account)
+    had = [id for id, starred in to_star if starred]
+    add = [id for id, starred in to_star if not starred]
+    if had:
+        store.set_star(account, had, 'had')
+    if not add and not to_unstar:
+        return 0
+    gmail = build('gmail', 'v1', credentials=get_credentials('modify', interactive=False),
+                  cache_discovery=False)
+    for ids, body, star in ((add, {'addLabelIds': ['STARRED']}, 'added'),
+                            (to_unstar, {'removeLabelIds': ['STARRED']}, None)):
+        for start in range(0, len(ids), BATCH_MODIFY_MAX):
+            chunk = ids[start:start + BATCH_MODIFY_MAX]
+            gmail.users().messages().batchModify(userId='me', body={'ids': chunk, **body}).execute(num_retries=5)
+            store.set_star(account, chunk, star)
+    return len(add) + len(to_unstar)

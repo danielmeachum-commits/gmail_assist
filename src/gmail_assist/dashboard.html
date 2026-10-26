@@ -311,6 +311,13 @@ dialog select, dialog input[type=text] { width: 100%; }
           (never starred mail). Undo on the list brings it back.</div></div>
       <input type="checkbox" id="auto-trash" style="width:18px;height:18px">
     </label></div>
+    <h2>Stars</h2>
+    <div class="panel"><label class="grant" style="cursor:pointer">
+      <div><div>Star mail that needs you</div>
+        <div class="what">Mail rated "act" gets a star in Gmail, once: a star you remove stays off. Rating an
+          email something else takes back a star this added; stars you added are never touched.</div></div>
+      <input type="checkbox" id="star-act" style="width:18px;height:18px">
+    </label></div>
   </section>
 
   <section id="review">
@@ -687,6 +694,11 @@ function renderStillSending(data) {
 $('#auto-trash').addEventListener('change', async (ev) => {
   try { await api('/api/settings', {trash_after_unsubscribe: ev.target.checked ? 'on' : 'off'});
         toast(ev.target.checked ? 'New mail from lists you left goes to Trash' : 'New mail from lists you left stays put'); }
+  catch (e) { ev.target.checked = !ev.target.checked; toast(e.message); }
+});
+$('#star-act').addEventListener('change', async (ev) => {
+  try { await api('/api/settings', {star_act: ev.target.checked ? 'on' : 'off'});
+        toast(ev.target.checked ? 'Mail that needs you gets a star' : 'No more stars on new mail'); }
   catch (e) { ev.target.checked = !ev.target.checked; toast(e.message); }
 });
 // -- unsubscribe suggestions -----------------------------------------------------------
@@ -1292,6 +1304,7 @@ async function signIn(access) {
 async function loadSettings() {
   const [, s] = await Promise.all([loadAuth(), api('/api/summary')]);
   $('#auto-trash').checked = s.trash_after_unsubscribe === 'on';
+  $('#star-act').checked = s.star_act === 'on';
 }
 async function loadAuth() {
   const status = await api('/api/auth');

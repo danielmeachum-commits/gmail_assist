@@ -65,6 +65,8 @@ SETTINGS = {
     'trash_after_unsubscribe': 'on',
     # 'on': decisions are applied to Gmail as labels after each sync (apply.py).
     'apply_labels': 'on',
+    # 'on': mail rated 'act' is starred in Gmail (apply.star_act_mail).
+    'star_act': 'on',
 }
 
 
@@ -147,6 +149,9 @@ class Message(Base):
     # You checked it off in the dashboard (or added it to Calendar): handled.
     done_at: Mapped[datetime | None]
     done_by: Mapped[str | None]               # 'user' or 'calendar'
+    # What starring 'act' mail did here (apply.star_act_mail): 'added' a star,
+    # or found one you'd 'had' already (never removed). None: not starred.
+    star: Mapped[str | None] = mapped_column(String(8))
 
     def body_text(self) -> str | None:
         return parse.body_text(self.payload) if self.has_body and self.payload else None
@@ -394,6 +399,8 @@ def _migrate(engine: Engine) -> None:
         if 'done_at' not in columns:
             conn.exec_driver_sql('ALTER TABLE messages ADD COLUMN done_at DATETIME')
             conn.exec_driver_sql('ALTER TABLE messages ADD COLUMN done_by VARCHAR')
+        if 'star' not in columns:
+            conn.exec_driver_sql('ALTER TABLE messages ADD COLUMN star VARCHAR(8)')
         # create_all() doesn't add indexes to tables that already exist.
         conn.exec_driver_sql(
             'CREATE INDEX IF NOT EXISTS messages_sender ON messages (account, sender_email)'
@@ -995,6 +1002,29 @@ class Store:
             s.execute(update(Message)
                       .where(Message.account == account, Message.id == message_id)
                       .values(attention=level, attention_by=by))
+
+    def star_plan(self, account: str) -> tuple[list[tuple[str, bool]], list[str]]:
+        """(messages to star, each with whether Gmail has it starred already;
+        messages whose star to take back). 'act' mail is starred once: a star
+        you remove in Gmail stays off. A star this added is taken back only
+        when you rate the message something else; yours are never touched."""
+        with self.ReadSession() as s:
+            to_star = s.execute(select(Message.id, Message.label_ids).where(
+                Message.account == account, Message.attention == 'act',
+                Message.star.is_(None), _triageable())).all()
+            to_unstar = s.scalars(select(Message.id).where(
+                Message.account == account, Message.star == 'added',
+                Message.attention != 'act', Message.attention_by == 'user')).all()
+        return [(id, 'STARRED' in labels) for id, labels in to_star], list(to_unstar)
+
+    def set_star(self, account: str, ids: list[str], star: str | None) -> None:
+        """Record what was done to these messages' stars, and mirror it in
+        label_ids so it's right before the next sync."""
+        with self.Session.begin() as s:
+            for m in s.scalars(select(Message).where(Message.account == account, Message.id.in_(ids))):
+                m.star = star
+                labels = [l for l in m.label_ids if l != 'STARRED']
+                m.label_ids = labels + ['STARRED'] if star else labels
 
     def attention_messages(self, account: str, levels: list[str], since: datetime,
                            until: datetime | None = None, unread_only: bool = False,
