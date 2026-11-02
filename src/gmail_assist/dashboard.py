@@ -10,7 +10,10 @@ replace the earlier decision and feed sender history.
 It binds to 127.0.0.1 only. Reach it from your other devices through
 Tailscale, tailnet only (never Funnel, which is public):
 
-    tailscale serve --bg --https=8443 http://127.0.0.1:8090
+    tailscale serve --bg --https=443 http://127.0.0.1:8090
+
+(so it's at https://<host>.<tailnet>.ts.net with no port; Gmail's push
+endpoint then goes on a Funnel port of its own, e.g. --https=8443).
 
 Requests must name this machine in their Host header (so a web page can't
 reach it by rebinding a DNS name to 127.0.0.1), and changes must be JSON
@@ -831,10 +834,10 @@ def start(account: str, db: Path | str | None = None, host: str = '127.0.0.1',
     names = {f'{host}:{port}', f'localhost:{port}', f'127.0.0.1:{port}'}
     if ts := tailnet_name():
         # tailscale serve passes the name on unchanged, with or without its port.
-        names |= {ts.lower(), f'{ts.lower()}:8443'}
+        names |= {ts.lower(), f'{ts.lower()}:443'}
     api = Api(store, account)
     api.on_change = on_change or (lambda: None)
     server = ThreadingHTTPServer((host, port), make_handler(api, names))
     threading.Thread(target=server.serve_forever, name='dashboard', daemon=True).start()
-    log.info('dashboard on http://%s:%d (tailnet: https://%s:8443)', host, port, ts or '?')
+    log.info('dashboard on http://%s:%d (tailnet: https://%s)', host, port, ts or '?')
     return server
